@@ -1,0 +1,9 @@
+{
+  "canisters": {
+    "dao_admin": {
+      "type": "custom",
+      "wasm": "wasm/dao_admin.wasm",
+      "candid": "src/dao_admin.did"
+    }
+  }
+}

@@ -1,0 +1,242 @@
+// DAO Admin Canister - Candid Interface
+// CRM, Finance, Analytics, Feature Flags
+
+type ContactId = nat64;
+type DealId = nat64;
+type TransactionId = nat64;
+type Timestamp = nat64;
+
+type ContactSource = variant {
+    Signup;
+    Referral;
+    Marketing;
+    Event;
+    Partner;
+    Other;
+};
+
+type ContactStatus = variant {
+    Active;
+    Inactive;
+    Churned;
+};
+
+type Contact = record {
+    id : ContactId;
+    user_id : opt text;
+    email : text;
+    name : opt text;
+    company : opt text;
+    job_title : opt text;
+    interest_area : opt text;
+    source : ContactSource;
+    notes : opt text;
+    status : ContactStatus;
+    created_at : Timestamp;
+    updated_at : Timestamp;
+};
+
+type CreateContactRequest = record {
+    user_id : opt text;
+    email : text;
+    name : opt text;
+    company : opt text;
+    job_title : opt text;
+    interest_area : opt text;
+    source : opt ContactSource;
+    notes : opt text;
+};
+
+type ContactFilter = record {
+    status : opt ContactStatus;
+    source : opt ContactSource;
+    search : opt text;
+};
+
+type DealStage = variant {
+    Lead;
+    Qualified;
+    Proposal;
+    Negotiation;
+    ClosedWon;
+    ClosedLost;
+};
+
+type Deal = record {
+    id : DealId;
+    contact_id : ContactId;
+    name : text;
+    value : opt nat64;
+    stage : DealStage;
+    notes : opt text;
+    expected_close_date : opt Timestamp;
+    created_at : Timestamp;
+    updated_at : Timestamp;
+};
+
+type CreateDealRequest = record {
+    contact_id : ContactId;
+    name : text;
+    value : opt nat64;
+    notes : opt text;
+    expected_close_date : opt Timestamp;
+};
+
+type DealFilter = record {
+    stage : opt DealStage;
+    contact_id : opt ContactId;
+};
+
+type TransactionType = variant {
+    Income;
+    Expense;
+};
+
+type TransactionCategory = variant {
+    Subscription;
+    Donation;
+    Service;
+    Infrastructure;
+    Marketing;
+    Payroll;
+    Legal;
+    Other;
+};
+
+type Transaction = record {
+    id : TransactionId;
+    transaction_type : TransactionType;
+    category : TransactionCategory;
+    amount : nat64;
+    currency : text;
+    description : text;
+    reference : opt text;
+    date : Timestamp;
+    created_at : Timestamp;
+};
+
+type CreateTransactionRequest = record {
+    transaction_type : TransactionType;
+    category : TransactionCategory;
+    amount : nat64;
+    currency : opt text;
+    description : text;
+    reference : opt text;
+    date : opt Timestamp;
+};
+
+type TransactionFilter = record {
+    transaction_type : opt TransactionType;
+    category : opt TransactionCategory;
+    from_date : opt Timestamp;
+    to_date : opt Timestamp;
+};
+
+type FinancialSummary = record {
+    total_income : nat64;
+    total_expenses : nat64;
+    net : int64;
+    mrr : nat64;
+    period_start : Timestamp;
+    period_end : Timestamp;
+};
+
+type FeatureFlag = record {
+    key : text;
+    enabled : bool;
+    description : opt text;
+    percentage : opt nat8;
+    allowed_principals : vec principal;
+    updated_at : Timestamp;
+};
+
+type SetFeatureFlagRequest = record {
+    key : text;
+    enabled : bool;
+    description : opt text;
+    percentage : opt nat8;
+    allowed_principals : opt vec principal;
+};
+
+type MetricsSnapshot = record {
+    total_users : nat64;
+    active_users_24h : nat64;
+    active_users_7d : nat64;
+    active_users_30d : nat64;
+    total_captures : nat64;
+    total_sprints : nat64;
+    total_workspaces : nat64;
+    timestamp : Timestamp;
+};
+
+type PaginationParams = record {
+    offset : opt nat64;
+    limit : opt nat64;
+};
+
+type PaginatedContactResponse = record {
+    items : vec Contact;
+    total : nat64;
+    offset : nat64;
+    limit : nat64;
+};
+
+type PaginatedDealResponse = record {
+    items : vec Deal;
+    total : nat64;
+    offset : nat64;
+    limit : nat64;
+};
+
+type PaginatedTransactionResponse = record {
+    items : vec Transaction;
+    total : nat64;
+    offset : nat64;
+    limit : nat64;
+};
+
+type AdminStats = record {
+    total_contacts : nat64;
+    total_deals : nat64;
+    total_transactions : nat64;
+    active_feature_flags : nat64;
+};
+
+service : (opt vec principal) -> {
+    // Admin Management
+    add_admin : (principal) -> (variant { Ok; Err : text });
+    remove_admin : (principal) -> (variant { Ok; Err : text });
+    get_admins : () -> (vec principal) query;
+
+    // Contact API
+    create_contact : (CreateContactRequest) -> (variant { Ok : Contact; Err : text });
+    create_contact_from_signup : (CreateContactRequest) -> (variant { Ok : Contact; Err : text });
+    get_contact : (ContactId) -> (opt Contact) query;
+    get_contact_by_email : (text) -> (opt Contact) query;
+    get_contacts : (opt ContactFilter, opt PaginationParams) -> (variant { Ok : PaginatedContactResponse; Err : text }) query;
+
+    // Deal API
+    create_deal : (CreateDealRequest) -> (variant { Ok : Deal; Err : text });
+    get_deal : (DealId) -> (opt Deal) query;
+    update_deal_stage : (DealId, DealStage) -> (variant { Ok : Deal; Err : text });
+    get_deals : (opt DealFilter, opt PaginationParams) -> (variant { Ok : PaginatedDealResponse; Err : text }) query;
+
+    // Transaction API
+    create_transaction : (CreateTransactionRequest) -> (variant { Ok : Transaction; Err : text });
+    get_transactions : (opt TransactionFilter, opt PaginationParams) -> (variant { Ok : PaginatedTransactionResponse; Err : text }) query;
+    get_financial_summary : (Timestamp, Timestamp) -> (variant { Ok : FinancialSummary; Err : text }) query;
+
+    // Feature Flag API
+    set_feature_flag : (SetFeatureFlagRequest) -> (variant { Ok; Err : text });
+    get_feature_flag : (text) -> (opt FeatureFlag) query;
+    is_feature_enabled : (text) -> (bool) query;
+    list_feature_flags : () -> (variant { Ok : vec FeatureFlag; Err : text }) query;
+
+    // Analytics API
+    log_activity : (text, text, opt text) -> ();
+    record_metrics : (MetricsSnapshot) -> (variant { Ok; Err : text });
+
+    // Stats & Health
+    get_admin_stats : () -> (variant { Ok : AdminStats; Err : text }) query;
+    health : () -> (text) query;
+}

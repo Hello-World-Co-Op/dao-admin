@@ -1,0 +1,24 @@
+[package]
+name = "dao_admin"
+version = "0.1.0"
+edition = "2021"
+description = "DAO Admin Canister - CRM, Finance, Analytics, Feature Flags"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ic-cdk = "0.13"
+ic-cdk-macros = "0.13"
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+pocket-ic = "6"
+candid = "0.10"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
