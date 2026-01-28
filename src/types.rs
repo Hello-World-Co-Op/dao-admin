@@ -15,8 +15,9 @@ pub type Timestamp = u64;
 // =============================================================================
 
 /// Contact source - how the contact was acquired
-#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq, Default)]
 pub enum ContactSource {
+    #[default]
     Signup,
     Referral,
     Marketing,
@@ -25,24 +26,13 @@ pub enum ContactSource {
     Other,
 }
 
-impl Default for ContactSource {
-    fn default() -> Self {
-        ContactSource::Signup
-    }
-}
-
 /// Contact status
-#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq, Default)]
 pub enum ContactStatus {
+    #[default]
     Active,
     Inactive,
     Churned,
-}
-
-impl Default for ContactStatus {
-    fn default() -> Self {
-        ContactStatus::Active
-    }
 }
 
 /// Contact record
@@ -80,20 +70,15 @@ pub struct CreateContactRequest {
 // =============================================================================
 
 /// Deal stage in pipeline
-#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq, Default)]
 pub enum DealStage {
+    #[default]
     Lead,
     Qualified,
     Proposal,
     Negotiation,
     ClosedWon,
     ClosedLost,
-}
-
-impl Default for DealStage {
-    fn default() -> Self {
-        DealStage::Lead
-    }
 }
 
 /// Deal record
@@ -132,7 +117,7 @@ pub enum TransactionType {
 }
 
 /// Transaction category
-#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq, Default)]
 pub enum TransactionCategory {
     Subscription,
     Donation,
@@ -141,13 +126,8 @@ pub enum TransactionCategory {
     Marketing,
     Payroll,
     Legal,
+    #[default]
     Other,
-}
-
-impl Default for TransactionCategory {
-    fn default() -> Self {
-        TransactionCategory::Other
-    }
 }
 
 /// Transaction record
