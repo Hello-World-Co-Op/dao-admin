@@ -328,6 +328,18 @@ fn record_metrics(snapshot: MetricsSnapshot) -> Result<(), String> {
     Ok(())
 }
 
+#[query]
+fn list_metrics(from: Timestamp, to: Timestamp, limit: Option<u64>) -> Result<Vec<MetricsSnapshot>, String> {
+    require_admin()?;
+    Ok(STATE.with(|state| state.borrow().list_metrics(from, to, limit)))
+}
+
+#[query]
+fn get_latest_metrics() -> Result<Option<MetricsSnapshot>, String> {
+    require_admin()?;
+    Ok(STATE.with(|state| state.borrow().get_latest_metrics()))
+}
+
 // =============================================================================
 // Stats & Health
 // =============================================================================

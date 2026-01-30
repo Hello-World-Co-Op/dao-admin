@@ -432,6 +432,30 @@ impl State {
             self.metrics_history.drain(0..30);
         }
     }
+
+    /// List metrics within a date range
+    pub fn list_metrics(&self, from: Timestamp, to: Timestamp, limit: Option<u64>) -> Vec<MetricsSnapshot> {
+        let limit = limit.unwrap_or(100) as usize;
+
+        let mut filtered: Vec<MetricsSnapshot> = self
+            .metrics_history
+            .iter()
+            .filter(|m| m.timestamp >= from && m.timestamp <= to)
+            .cloned()
+            .collect();
+
+        // Sort by timestamp descending (newest first)
+        filtered.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        // Apply limit
+        filtered.truncate(limit);
+        filtered
+    }
+
+    /// Get the most recent metrics snapshot
+    pub fn get_latest_metrics(&self) -> Option<MetricsSnapshot> {
+        self.metrics_history.last().cloned()
+    }
 }
 
 thread_local! {
@@ -450,6 +474,8 @@ pub struct StableState {
     pub transactions: Vec<(TransactionId, Transaction)>,
     pub next_transaction_id: TransactionId,
     pub feature_flags: Vec<(String, FeatureFlag)>,
+    #[serde(default)]
+    pub metrics_history: Vec<MetricsSnapshot>,
 }
 
 impl From<&State> for StableState {
@@ -464,6 +490,7 @@ impl From<&State> for StableState {
             transactions: state.transactions.iter().map(|(k, v)| (*k, v.clone())).collect(),
             next_transaction_id: state.next_transaction_id,
             feature_flags: state.feature_flags.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            metrics_history: state.metrics_history.clone(),
         }
     }
 }
@@ -480,6 +507,7 @@ impl From<StableState> for State {
             transactions: stable.transactions.iter().cloned().collect(),
             next_transaction_id: stable.next_transaction_id,
             feature_flags: stable.feature_flags.iter().cloned().collect(),
+            metrics_history: stable.metrics_history,
             ..Default::default()
         };
 

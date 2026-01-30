@@ -2,6 +2,9 @@
 target/
 Cargo.lock
 
+# Build artifacts
+wasm/
+
 # PocketIC binary (download or copy from another repo)
 pocket-ic
 

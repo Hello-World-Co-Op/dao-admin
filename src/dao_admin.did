@@ -235,6 +235,8 @@ service : (opt vec principal) -> {
     // Analytics API
     log_activity : (text, text, opt text) -> ();
     record_metrics : (MetricsSnapshot) -> (variant { Ok; Err : text });
+    list_metrics : (Timestamp, Timestamp, opt nat64) -> (variant { Ok : vec MetricsSnapshot; Err : text }) query;
+    get_latest_metrics : () -> (variant { Ok : opt MetricsSnapshot; Err : text }) query;
 
     // Stats & Health
     get_admin_stats : () -> (variant { Ok : AdminStats; Err : text }) query;

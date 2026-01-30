@@ -1851,3 +1851,307 @@ fn test_get_admin_stats() {
     assert_eq!(stats.total_transactions, 1);
     assert_eq!(stats.active_feature_flags, 1);
 }
+
+// ============================================================================
+// Metrics History API Tests (FOS-3.2.9a)
+// ============================================================================
+
+#[test]
+fn test_list_metrics_returns_empty_when_no_metrics() {
+    let (pic, canister_id, controller) = setup();
+
+    // Query with a wide date range (requires admin)
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "list_metrics",
+            encode_args((0u64, u64::MAX, None::<u64>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let metrics = result.expect("Should succeed for admin");
+    assert!(metrics.is_empty(), "Should return empty vec when no metrics recorded");
+}
+
+#[test]
+fn test_get_latest_metrics_returns_none_when_no_metrics() {
+    let (pic, canister_id, controller) = setup();
+
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_latest_metrics",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let metrics = result.expect("Should succeed for admin");
+    assert!(metrics.is_none(), "Should return None when no metrics recorded");
+}
+
+#[test]
+fn test_list_metrics_requires_admin() {
+    let (pic, canister_id, _) = setup();
+    let non_admin = non_admin_principal();
+
+    let response = pic
+        .query_call(
+            canister_id,
+            non_admin,
+            "list_metrics",
+            encode_args((0u64, u64::MAX, None::<u64>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to list metrics");
+}
+
+#[test]
+fn test_get_latest_metrics_requires_admin() {
+    let (pic, canister_id, _) = setup();
+    let non_admin = non_admin_principal();
+
+    let response = pic
+        .query_call(
+            canister_id,
+            non_admin,
+            "get_latest_metrics",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to get latest metrics");
+}
+
+#[test]
+fn test_record_and_list_metrics() {
+    let (pic, canister_id, controller) = setup();
+
+    // Record a metrics snapshot
+    let snapshot1 = MetricsSnapshot {
+        total_users: 100,
+        active_users_24h: 50,
+        active_users_7d: 80,
+        active_users_30d: 95,
+        total_captures: 1000,
+        total_sprints: 10,
+        total_workspaces: 5,
+        timestamp: 1000000000000000000, // 1 second in nanoseconds
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "record_metrics",
+            encode_one(snapshot1.clone()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Record metrics should succeed");
+
+    // Query metrics (requires admin)
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "list_metrics",
+            encode_args((0u64, u64::MAX, None::<u64>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let metrics = result.expect("Should succeed for admin");
+    assert_eq!(metrics.len(), 1, "Should have 1 metrics snapshot");
+    assert_eq!(metrics[0].total_users, 100);
+    assert_eq!(metrics[0].active_users_24h, 50);
+}
+
+#[test]
+fn test_get_latest_metrics_returns_most_recent() {
+    let (pic, canister_id, controller) = setup();
+
+    // Record two snapshots with different timestamps
+    let snapshot1 = MetricsSnapshot {
+        total_users: 100,
+        active_users_24h: 50,
+        active_users_7d: 80,
+        active_users_30d: 95,
+        total_captures: 1000,
+        total_sprints: 10,
+        total_workspaces: 5,
+        timestamp: 1000000000000000000,
+    };
+
+    let snapshot2 = MetricsSnapshot {
+        total_users: 150,
+        active_users_24h: 75,
+        active_users_7d: 120,
+        active_users_30d: 140,
+        total_captures: 1500,
+        total_sprints: 15,
+        total_workspaces: 8,
+        timestamp: 2000000000000000000, // Later timestamp
+    };
+
+    // Record first snapshot
+    pic.update_call(
+        canister_id,
+        controller,
+        "record_metrics",
+        encode_one(snapshot1).unwrap(),
+    )
+    .unwrap();
+
+    // Record second snapshot
+    pic.update_call(
+        canister_id,
+        controller,
+        "record_metrics",
+        encode_one(snapshot2).unwrap(),
+    )
+    .unwrap();
+
+    // Get latest should return the most recent (requires admin)
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_latest_metrics",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let latest = result.expect("Should succeed for admin").expect("Should have latest metrics");
+    assert_eq!(latest.total_users, 150, "Should return most recent snapshot");
+    assert_eq!(latest.timestamp, 2000000000000000000);
+}
+
+#[test]
+fn test_list_metrics_respects_date_range() {
+    let (pic, canister_id, controller) = setup();
+
+    // Record snapshots with different timestamps
+    let timestamps = [
+        1000000000000000000u64, // t1
+        2000000000000000000u64, // t2
+        3000000000000000000u64, // t3
+    ];
+
+    for (i, ts) in timestamps.iter().enumerate() {
+        let snapshot = MetricsSnapshot {
+            total_users: (i + 1) as u64 * 100,
+            active_users_24h: 50,
+            active_users_7d: 80,
+            active_users_30d: 95,
+            total_captures: 1000,
+            total_sprints: 10,
+            total_workspaces: 5,
+            timestamp: *ts,
+        };
+
+        pic.update_call(
+            canister_id,
+            controller,
+            "record_metrics",
+            encode_one(snapshot).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // Query only middle timestamp (t2) - requires admin
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "list_metrics",
+            encode_args((1500000000000000000u64, 2500000000000000000u64, None::<u64>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let metrics = result.expect("Should succeed for admin");
+    assert_eq!(metrics.len(), 1, "Should only return snapshot in date range");
+    assert_eq!(metrics[0].total_users, 200, "Should be the second snapshot");
+}
+
+#[test]
+fn test_list_metrics_respects_limit() {
+    let (pic, canister_id, controller) = setup();
+
+    // Record 5 snapshots
+    for i in 0..5 {
+        let snapshot = MetricsSnapshot {
+            total_users: (i + 1) as u64 * 100,
+            active_users_24h: 50,
+            active_users_7d: 80,
+            active_users_30d: 95,
+            total_captures: 1000,
+            total_sprints: 10,
+            total_workspaces: 5,
+            timestamp: (i + 1) as u64 * 1000000000000000000,
+        };
+
+        pic.update_call(
+            canister_id,
+            controller,
+            "record_metrics",
+            encode_one(snapshot).unwrap(),
+        )
+        .unwrap();
+    }
+
+    // Query with limit of 2 - requires admin
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "list_metrics",
+            encode_args((0u64, u64::MAX, Some(2u64))).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<MetricsSnapshot>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let metrics = result.expect("Should succeed for admin");
+    assert_eq!(metrics.len(), 2, "Should respect limit parameter");
+    // Results should be sorted descending (newest first)
+    assert_eq!(metrics[0].total_users, 500, "First should be newest");
+    assert_eq!(metrics[1].total_users, 400, "Second should be second newest");
+}
+
+#[test]
+fn test_record_metrics_requires_admin() {
+    let (pic, canister_id, _) = setup();
+    let non_admin = non_admin_principal();
+
+    let snapshot = MetricsSnapshot {
+        total_users: 100,
+        active_users_24h: 50,
+        active_users_7d: 80,
+        active_users_30d: 95,
+        total_captures: 1000,
+        total_sprints: 10,
+        total_workspaces: 5,
+        timestamp: 1000000000000000000,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            non_admin,
+            "record_metrics",
+            encode_one(snapshot).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to record metrics");
+}
