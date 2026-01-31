@@ -3,7 +3,12 @@
     "dao_admin": {
       "type": "custom",
       "wasm": "wasm/dao_admin.wasm",
-      "candid": "src/dao_admin.did"
+      "candid": "src/dao_admin.did",
+      "controllers": [
+        "2mxpv-qgwmp-zqxyb-h7ugz-vfuvz-2wfpx-xmgmv-3ba6c-fsf6b-ehayk-hae",
+        "vfnqe-wn3wk-lowg4-xzrfv-7j62s-mo4ne-vewaa-f7zce-3igsf-vobbr-3qe",
+        "7f4n5-h5keb-3uasn-vkbaz-psqzu-2gr7k-zotrs-ok5in-jocho-qqtw4-2ae"
+      ]
     }
   }
 }
