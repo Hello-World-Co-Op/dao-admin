@@ -3406,3 +3406,743 @@ fn test_create_contact_from_signup_creates_audit_logs() {
     let deal_details = deal_logs[0].details.as_ref().unwrap();
     assert!(deal_details.contains("source"), "Deal details should contain source");
 }
+
+// ============================================================================
+// FOS-5.6.11: Input Validation Tests
+// ============================================================================
+
+/// Maximum transaction amount in cents ($1,000,000.00)
+const MAX_TRANSACTION_AMOUNT: u64 = 100_000_000;
+
+/// Maximum deal value in cents ($10,000,000.00)
+const MAX_DEAL_VALUE: u64 = 1_000_000_000;
+
+// ----------------------------------------------------------------------------
+// Contact Validation Tests (AC-5.6.11.1, AC-5.6.11.2)
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_create_contact_invalid_email_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "not-an-email".to_string(), // Invalid email format
+        name: Some("Test User".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject invalid email format");
+    assert!(
+        result.unwrap_err().to_lowercase().contains("email"),
+        "Error should mention email"
+    );
+}
+
+#[test]
+fn test_create_contact_empty_email_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "".to_string(), // Empty email
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject empty email");
+}
+
+#[test]
+fn test_create_contact_name_too_short_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "valid@example.com".to_string(),
+        name: Some("A".to_string()), // Too short (min 2)
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject name that's too short");
+    assert!(
+        result.unwrap_err().contains("Name"),
+        "Error should mention Name"
+    );
+}
+
+#[test]
+fn test_create_contact_notes_too_long_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "valid@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: Some("x".repeat(5001)), // Exceeds 5000 char limit
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject notes that are too long");
+    assert!(
+        result.unwrap_err().contains("Notes"),
+        "Error should mention Notes"
+    );
+}
+
+#[test]
+fn test_create_contact_valid_request_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "valid@example.com".to_string(),
+        name: Some("John Doe".to_string()),
+        company: Some("Acme Corp".to_string()),
+        job_title: Some("Engineer".to_string()),
+        interest_area: None,
+        source: None,
+        notes: Some("Valid notes".to_string()),
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should accept valid contact request");
+}
+
+// ----------------------------------------------------------------------------
+// Update Contact Validation Tests (AC-5.6.11.1, AC-5.6.11.2)
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_update_contact_name_too_short_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact
+    let create_request = CreateContactRequest {
+        user_id: None,
+        email: "update-test@example.com".to_string(),
+        name: Some("Valid Name".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let create_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(create_request).unwrap(),
+        )
+        .unwrap();
+    let create_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(create_response)).unwrap();
+    let contact = create_result.expect("Should create contact");
+
+    // Try to update with name too short
+    let update_request = UpdateContactRequest {
+        id: contact.id,
+        name: Some("A".to_string()), // Too short (min 2)
+        company: None,
+        job_title: None,
+        interest_area: None,
+        notes: None,
+        status: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "update_contact",
+            encode_one(update_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject name that's too short");
+    assert!(
+        result.unwrap_err().contains("Name"),
+        "Error should mention Name"
+    );
+}
+
+#[test]
+fn test_update_contact_notes_too_long_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact
+    let create_request = CreateContactRequest {
+        user_id: None,
+        email: "update-notes-test@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let create_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(create_request).unwrap(),
+        )
+        .unwrap();
+    let create_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(create_response)).unwrap();
+    let contact = create_result.expect("Should create contact");
+
+    // Try to update with notes too long
+    let update_request = UpdateContactRequest {
+        id: contact.id,
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        notes: Some("x".repeat(5001)), // Exceeds 5000 char limit
+        status: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "update_contact",
+            encode_one(update_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject notes that are too long");
+    assert!(
+        result.unwrap_err().contains("Notes"),
+        "Error should mention Notes"
+    );
+}
+
+#[test]
+fn test_update_contact_valid_request_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact
+    let create_request = CreateContactRequest {
+        user_id: None,
+        email: "update-valid-test@example.com".to_string(),
+        name: Some("Original Name".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let create_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(create_request).unwrap(),
+        )
+        .unwrap();
+    let create_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(create_response)).unwrap();
+    let contact = create_result.expect("Should create contact");
+
+    // Update with valid values
+    let update_request = UpdateContactRequest {
+        id: contact.id,
+        name: Some("Updated Name".to_string()),
+        company: Some("New Company".to_string()),
+        job_title: None,
+        interest_area: None,
+        notes: Some("Updated notes".to_string()),
+        status: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "update_contact",
+            encode_one(update_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should accept valid update request");
+    let updated = result.unwrap();
+    assert_eq!(updated.name, Some("Updated Name".to_string()));
+    assert_eq!(updated.company, Some("New Company".to_string()));
+}
+
+// ----------------------------------------------------------------------------
+// Deal Validation Tests (AC-5.6.11.1, AC-5.6.11.3)
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_create_deal_name_too_short_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact
+    let contact_request = CreateContactRequest {
+        user_id: None,
+        email: "deal-test@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let contact_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(contact_request).unwrap(),
+        )
+        .unwrap();
+    let contact_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(contact_response)).unwrap();
+    let contact = contact_result.expect("Should create contact");
+
+    // Try to create deal with short name
+    let deal_request = CreateDealRequest {
+        contact_id: contact.id,
+        name: "AB".to_string(), // Too short (min 3)
+        value: None,
+        notes: None,
+        expected_close_date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_deal",
+            encode_one(deal_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<DealV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject deal name that's too short");
+    assert!(
+        result.unwrap_err().contains("Deal name"),
+        "Error should mention Deal name"
+    );
+}
+
+#[test]
+fn test_create_deal_value_exceeds_max_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact
+    let contact_request = CreateContactRequest {
+        user_id: None,
+        email: "deal-value-test@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let contact_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(contact_request).unwrap(),
+        )
+        .unwrap();
+    let contact_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(contact_response)).unwrap();
+    let contact = contact_result.expect("Should create contact");
+
+    // Try to create deal with value exceeding max
+    let deal_request = CreateDealRequest {
+        contact_id: contact.id,
+        name: "Big Deal".to_string(),
+        value: Some(MAX_DEAL_VALUE + 1), // Exceeds max
+        notes: None,
+        expected_close_date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_deal",
+            encode_one(deal_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<DealV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject deal value exceeding max");
+    assert!(
+        result.unwrap_err().contains("cannot exceed"),
+        "Error should mention value limit"
+    );
+}
+
+#[test]
+fn test_create_deal_valid_request_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact
+    let contact_request = CreateContactRequest {
+        user_id: None,
+        email: "deal-valid-test@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let contact_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(contact_request).unwrap(),
+        )
+        .unwrap();
+    let contact_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(contact_response)).unwrap();
+    let contact = contact_result.expect("Should create contact");
+
+    // Create deal with valid values
+    let deal_request = CreateDealRequest {
+        contact_id: contact.id,
+        name: "Valid Deal".to_string(),
+        value: Some(100_000), // $1,000.00
+        notes: Some("Deal notes".to_string()),
+        expected_close_date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_deal",
+            encode_one(deal_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<DealV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should accept valid deal request");
+}
+
+#[test]
+fn test_update_deal_value_exceeds_max_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    // First create a valid contact and deal
+    let contact_request = CreateContactRequest {
+        user_id: None,
+        email: "update-deal-test@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: None,
+        notes: None,
+    };
+
+    let contact_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(contact_request).unwrap(),
+        )
+        .unwrap();
+    let contact_result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(contact_response)).unwrap();
+    let contact = contact_result.expect("Should create contact");
+
+    let deal_request = CreateDealRequest {
+        contact_id: contact.id,
+        name: "Update Test Deal".to_string(),
+        value: Some(1000),
+        notes: None,
+        expected_close_date: None,
+    };
+
+    let deal_response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_deal",
+            encode_one(deal_request).unwrap(),
+        )
+        .unwrap();
+    let deal_result: Result<DealV2, String> = decode_one(&unwrap_wasm_result(deal_response)).unwrap();
+    let deal = deal_result.expect("Should create deal");
+
+    // Try to update deal with value exceeding max
+    let update_request = UpdateDealRequest {
+        id: deal.id,
+        name: None,
+        value: Some(MAX_DEAL_VALUE + 1), // Exceeds max
+        stage: None,
+        notes: None,
+        expected_close_date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "update_deal",
+            encode_one(update_request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<DealV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject update with value exceeding max");
+}
+
+// ----------------------------------------------------------------------------
+// Transaction Validation Tests (AC-5.6.11.1, AC-5.6.11.4)
+// ----------------------------------------------------------------------------
+
+#[test]
+fn test_create_transaction_amount_exceeds_max_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateTransactionRequest {
+        transaction_type: TransactionType::Income,
+        category: TransactionCategory::Other,
+        amount: MAX_TRANSACTION_AMOUNT + 1, // Exceeds max
+        currency: Some("USD".to_string()),
+        description: "Large transaction".to_string(),
+        reference: None,
+        date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_transaction",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Transaction, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject transaction amount exceeding max");
+    assert!(
+        result.unwrap_err().contains("cannot exceed"),
+        "Error should mention amount limit"
+    );
+}
+
+#[test]
+fn test_create_transaction_empty_description_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateTransactionRequest {
+        transaction_type: TransactionType::Income,
+        category: TransactionCategory::Other,
+        amount: 1000,
+        currency: None,
+        description: "".to_string(), // Empty description
+        reference: None,
+        date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_transaction",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Transaction, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject empty description");
+    assert!(
+        result.unwrap_err().contains("Description"),
+        "Error should mention Description"
+    );
+}
+
+#[test]
+fn test_create_transaction_description_too_long_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateTransactionRequest {
+        transaction_type: TransactionType::Expense,
+        category: TransactionCategory::Other,
+        amount: 1000,
+        currency: None,
+        description: "x".repeat(1001), // Exceeds 1000 char limit
+        reference: None,
+        date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_transaction",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Transaction, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject description that's too long");
+}
+
+#[test]
+fn test_create_transaction_invalid_currency_rejected() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateTransactionRequest {
+        transaction_type: TransactionType::Income,
+        category: TransactionCategory::Other,
+        amount: 1000,
+        currency: Some("usd".to_string()), // lowercase (invalid)
+        description: "Test transaction".to_string(),
+        reference: None,
+        date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_transaction",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Transaction, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should reject invalid currency format");
+    assert!(
+        result.unwrap_err().contains("ISO 4217"),
+        "Error should mention ISO 4217"
+    );
+}
+
+#[test]
+fn test_create_transaction_valid_request_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateTransactionRequest {
+        transaction_type: TransactionType::Income,
+        category: TransactionCategory::Subscription,
+        amount: 10_000, // $100.00
+        currency: Some("USD".to_string()),
+        description: "Monthly subscription".to_string(),
+        reference: Some("INV-001".to_string()),
+        date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_transaction",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Transaction, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should accept valid transaction request");
+}
+
+#[test]
+fn test_create_transaction_at_max_amount_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateTransactionRequest {
+        transaction_type: TransactionType::Income,
+        category: TransactionCategory::Other,
+        amount: MAX_TRANSACTION_AMOUNT, // Exactly at max
+        currency: Some("USD".to_string()),
+        description: "Maximum amount transaction".to_string(),
+        reference: None,
+        date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_transaction",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Transaction, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should accept transaction at exactly max amount");
+}

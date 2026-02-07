@@ -1,11 +1,13 @@
 mod state;
 mod types;
+mod validation;
 
 use candid::Principal;
 use ic_cdk_macros::{init, post_upgrade, pre_upgrade, query, update};
 
 pub use state::{State, StableState, STATE};
 pub use types::*;
+pub use validation::*;
 
 // =============================================================================
 // Canister Lifecycle
@@ -329,10 +331,14 @@ fn get_audit_log(
 /// Create a new contact (admin only)
 /// @see AC-5.6.10.1 - Sets owner_id to caller for row-level security
 /// @see AC-5.6.10.4 - Audit logging
+/// @see AC-5.6.11.1, AC-5.6.11.2 - Input validation
 #[update]
 fn create_contact(request: CreateContactRequest) -> Result<Contact, String> {
     require_admin()?;
     let caller = ic_cdk::caller();
+
+    // FOS-5.6.11: Validate input before processing
+    validate_create_contact(&request)?;
 
     let contact = STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -361,10 +367,14 @@ fn create_contact(request: CreateContactRequest) -> Result<Contact, String> {
 /// @see AC-5.6.8.3 - Validates caller is user-service canister
 /// @see AC-5.6.10.1 - Sets owner_id to service principal (caller)
 /// @see AC-5.6.10.4 - Audit logging for CRM operations
+/// @see AC-5.6.11.1, AC-5.6.11.2 - Input validation
 #[update]
 fn create_contact_from_signup(request: CreateContactRequest) -> Result<Contact, String> {
     // Verify caller is the authorized user-service canister
     require_authorized_canister("user-service")?;
+
+    // FOS-5.6.11: Validate input before processing
+    validate_create_contact(&request)?;
 
     let caller = ic_cdk::caller();
 
@@ -458,10 +468,14 @@ fn get_contacts(
 /// Update a contact with permission check
 /// @see AC-5.6.10.3 - Granular CRUD permissions (EditOwnContacts/EditAllContacts)
 /// @see AC-5.6.10.4 - Audit logging
+/// @see AC-5.6.11.1, AC-5.6.11.2 - Input validation
 #[update]
 fn update_contact(request: UpdateContactRequest) -> Result<Contact, String> {
     require_admin()?;
     let caller = ic_cdk::caller();
+
+    // FOS-5.6.11: Validate input before processing
+    validate_update_contact(&request)?;
 
     STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -561,10 +575,14 @@ fn delete_contact(id: ContactId) -> Result<Contact, String> {
 /// Create a new deal (admin only)
 /// @see AC-5.6.10.1 - Sets owner_id to caller for row-level security
 /// @see AC-5.6.10.4 - Audit logging
+/// @see AC-5.6.11.1, AC-5.6.11.3 - Input validation
 #[update]
 fn create_deal(request: CreateDealRequest) -> Result<Deal, String> {
     require_admin()?;
     let caller = ic_cdk::caller();
+
+    // FOS-5.6.11: Validate input before processing
+    validate_create_deal(&request)?;
 
     STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -646,10 +664,14 @@ fn update_deal_stage(id: DealId, stage: DealStage) -> Result<Deal, String> {
 /// Update a deal with permission check
 /// @see AC-5.6.10.3 - Granular CRUD permissions (EditOwnDeals/EditAllDeals)
 /// @see AC-5.6.10.4 - Audit logging
+/// @see AC-5.6.11.1, AC-5.6.11.3 - Input validation
 #[update]
 fn update_deal(request: UpdateDealRequest) -> Result<Deal, String> {
     require_admin()?;
     let caller = ic_cdk::caller();
+
+    // FOS-5.6.11: Validate input before processing
+    validate_update_deal(&request)?;
 
     STATE.with(|state| {
         let mut s = state.borrow_mut();
@@ -761,9 +783,14 @@ fn get_deals(
 // Transaction API
 // =============================================================================
 
+/// Create a new transaction (admin only)
+/// @see AC-5.6.11.1, AC-5.6.11.4 - Input validation with amount limits
 #[update]
 fn create_transaction(request: CreateTransactionRequest) -> Result<Transaction, String> {
     require_admin()?;
+
+    // FOS-5.6.11: Validate input before processing
+    validate_create_transaction(&request)?;
 
     let transaction = STATE.with(|state| {
         state.borrow_mut().create_transaction(request)
