@@ -51,6 +51,11 @@ fn post_upgrade() {
         *state.borrow_mut() = restored_state;
     });
 
+    // FOS-5.6.10: Migrate ownership for records created before row-level security
+    STATE.with(|state| {
+        state.borrow_mut().migrate_ownership();
+    });
+
     ic_cdk::println!("===========================================");
     ic_cdk::println!("DAO Admin Upgrade Complete");
     ic_cdk::println!("===========================================");
@@ -208,15 +213,144 @@ fn list_authorized_canisters() -> Result<Vec<(String, Principal)>, String> {
 }
 
 // =============================================================================
+// Permission Management (FOS-5.6.10)
+// =============================================================================
+
+/// Grant a permission to an admin
+/// @see AC-5.6.10.3 - Granular CRUD permissions
+#[update]
+async fn grant_permission(principal: Principal, permission: AdminPermission) -> Result<(), String> {
+    require_controller().await?;
+
+    STATE.with(|state| {
+        state.borrow_mut().grant_permission(principal, permission.clone());
+    });
+
+    ic_cdk::println!("Granted permission {:?} to {}", permission, principal);
+    Ok(())
+}
+
+/// Revoke a permission from an admin
+/// @see AC-5.6.10.3 - Granular CRUD permissions
+#[update]
+async fn revoke_permission(principal: Principal, permission: AdminPermission) -> Result<(), String> {
+    require_controller().await?;
+
+    STATE.with(|state| {
+        state.borrow_mut().revoke_permission(&principal, &permission);
+    });
+
+    ic_cdk::println!("Revoked permission {:?} from {}", permission, principal);
+    Ok(())
+}
+
+/// Get permissions for a principal (admin can view their own, controller can view all)
+#[query]
+fn get_permissions(principal: Option<Principal>) -> Result<Vec<AdminPermission>, String> {
+    let caller = ic_cdk::caller();
+
+    let target = principal.unwrap_or(caller);
+
+    STATE.with(|state| {
+        let s = state.borrow();
+
+        // Only controllers can view other admins' permissions
+        if target != caller && !s.is_controller(&caller) {
+            return Err("Unauthorized: Only controllers can view other admins' permissions".to_string());
+        }
+
+        if !s.is_admin(&target) && !s.is_controller(&target) {
+            return Err("Target is not an admin".to_string());
+        }
+
+        Ok(s.get_permissions(&target))
+    })
+}
+
+/// Grant default permissions to all admins (controller only)
+/// Call after upgrade to ensure all admins have basic permissions
+#[update]
+async fn grant_default_permissions_to_all_admins() -> Result<u32, String> {
+    require_controller().await?;
+
+    let count = STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        let admins: Vec<Principal> = s.admins.clone();
+
+        for admin in &admins {
+            s.grant_default_permissions(*admin);
+        }
+
+        admins.len() as u32
+    });
+
+    ic_cdk::println!("Granted default permissions to {} admins", count);
+    Ok(count)
+}
+
+// =============================================================================
+// Audit Log API (FOS-5.6.10)
+// =============================================================================
+
+/// Get audit log entries
+/// @see AC-5.6.10.4, AC-5.6.10.5 - Audit logging
+#[query]
+fn get_audit_log(
+    action_filter: Option<String>,
+    target_type_filter: Option<String>,
+    actor_filter: Option<Principal>,
+    limit: Option<u64>,
+) -> Result<Vec<AuditLogEntry>, String> {
+    require_admin()?;
+
+    let caller = ic_cdk::caller();
+
+    STATE.with(|state| {
+        let s = state.borrow();
+
+        // Check ViewAuditLogs permission
+        if !s.has_permission(&caller, &AdminPermission::ViewAuditLogs) && !s.is_controller(&caller) {
+            return Err("Unauthorized: ViewAuditLogs permission required".to_string());
+        }
+
+        Ok(s.get_audit_log(
+            action_filter.as_deref(),
+            target_type_filter.as_deref(),
+            actor_filter.as_ref(),
+            limit,
+        ))
+    })
+}
+
+// =============================================================================
 // Contact API
 // =============================================================================
 
+/// Create a new contact (admin only)
+/// @see AC-5.6.10.1 - Sets owner_id to caller for row-level security
+/// @see AC-5.6.10.4 - Audit logging
 #[update]
 fn create_contact(request: CreateContactRequest) -> Result<Contact, String> {
     require_admin()?;
+    let caller = ic_cdk::caller();
 
     let contact = STATE.with(|state| {
-        state.borrow_mut().create_contact(request)
+        let mut s = state.borrow_mut();
+        let contact = s.create_contact(request.clone(), caller);
+
+        // Audit log
+        s.record_audit_log(
+            caller,
+            "create_contact",
+            "contact",
+            &contact.id.to_string(),
+            Some(serde_json::json!({
+                "email": request.email,
+                "source": format!("{:?}", request.source.unwrap_or_default()),
+            }).to_string()),
+        );
+
+        contact
     });
 
     ic_cdk::println!("Created contact {}: {}", contact.id, contact.email);
@@ -225,32 +359,67 @@ fn create_contact(request: CreateContactRequest) -> Result<Contact, String> {
 
 /// Called by user-service when a new user signs up
 /// @see AC-5.6.8.3 - Validates caller is user-service canister
+/// @see AC-5.6.10.1 - Sets owner_id to service principal (caller)
+/// @see AC-5.6.10.4 - Audit logging for CRM operations
 #[update]
 fn create_contact_from_signup(request: CreateContactRequest) -> Result<Contact, String> {
     // Verify caller is the authorized user-service canister
     require_authorized_canister("user-service")?;
 
     let caller = ic_cdk::caller();
-    ic_cdk::println!("create_contact_from_signup called by: {}", caller);
 
     let contact = STATE.with(|state| {
-        state.borrow_mut().create_contact(request)
+        let mut s = state.borrow_mut();
+        let contact = s.create_contact(request.clone(), caller);
+
+        // Audit log for contact creation (AC-5.6.10.4)
+        s.record_audit_log(
+            caller,
+            "create_contact_from_signup",
+            "contact",
+            &contact.id.to_string(),
+            Some(serde_json::json!({
+                "source": "user_signup",
+                "user_id": request.user_id,
+            }).to_string()),
+        );
+
+        contact
     });
 
     // Auto-create a deal for the new lead
     let deal_request = CreateDealRequest {
         contact_id: contact.id,
-        name: format!("New signup: {}", contact.email),
+        name: format!("New signup: Contact #{}", contact.id),
         value: None,
         notes: Some("Auto-created from user signup".to_string()),
         expected_close_date: None,
     };
 
-    let _ = STATE.with(|state| {
-        state.borrow_mut().create_deal(deal_request)
+    let deal = STATE.with(|state| {
+        let mut s = state.borrow_mut();
+        let deal = s.create_deal(deal_request.clone(), caller)?;
+
+        // Audit log for auto-created deal (AC-5.6.10.4)
+        s.record_audit_log(
+            caller,
+            "create_deal_from_signup",
+            "deal",
+            &deal.id.to_string(),
+            Some(serde_json::json!({
+                "contact_id": deal_request.contact_id,
+                "source": "auto_signup",
+            }).to_string()),
+        );
+
+        Ok::<_, String>(deal)
     });
 
-    ic_cdk::println!("Created contact from signup: {}", contact.email);
+    if let Err(e) = deal {
+        // Log but don't fail - contact was created successfully
+        ic_cdk::println!("Warning: Failed to auto-create deal: {}", e);
+    }
+
     Ok(contact)
 }
 
@@ -271,28 +440,150 @@ fn get_contact_by_email(email: String) -> Result<Option<Contact>, String> {
     Ok(STATE.with(|state| state.borrow().get_contact_by_email(&email).cloned()))
 }
 
+/// Get contacts with row-level security filtering
+/// @see AC-5.6.10.1 - Row-level security filtering
 #[query]
 fn get_contacts(
     filter: Option<ContactFilter>,
     pagination: Option<PaginationParams>,
 ) -> Result<PaginatedResponse<Contact>, String> {
     require_admin()?;
+    let caller = ic_cdk::caller();
 
     Ok(STATE.with(|state| {
-        state.borrow().get_contacts(filter, pagination.unwrap_or_default())
+        state.borrow().get_contacts(filter, pagination.unwrap_or_default(), &caller)
     }))
+}
+
+/// Update a contact with permission check
+/// @see AC-5.6.10.3 - Granular CRUD permissions (EditOwnContacts/EditAllContacts)
+/// @see AC-5.6.10.4 - Audit logging
+#[update]
+fn update_contact(request: UpdateContactRequest) -> Result<Contact, String> {
+    require_admin()?;
+    let caller = ic_cdk::caller();
+
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+
+        // Get contact to check ownership
+        let contact = s.get_contact(request.id)
+            .ok_or("Contact not found")?
+            .clone();
+
+        // Check permissions
+        let has_edit_all = s.has_permission(&caller, &AdminPermission::EditAllContacts);
+        let has_edit_own = s.has_permission(&caller, &AdminPermission::EditOwnContacts);
+        let is_owner = contact.owner_id.as_ref() == Some(&caller);
+
+        if !has_edit_all && !(has_edit_own && is_owner) {
+            return Err("Unauthorized: Cannot edit this contact".to_string());
+        }
+
+        // Capture old values for audit log
+        let old_values = serde_json::json!({
+            "name": contact.name,
+            "company": contact.company,
+            "status": format!("{:?}", contact.status),
+        }).to_string();
+
+        // Perform update
+        let updated = s.update_contact(
+            request.id,
+            request.name,
+            request.company,
+            request.job_title,
+            request.interest_area,
+            request.notes,
+            request.status,
+        ).ok_or("Failed to update contact")?;
+
+        // Audit log
+        s.record_audit_log(
+            caller,
+            "update_contact",
+            "contact",
+            &request.id.to_string(),
+            Some(old_values),
+        );
+
+        Ok(updated)
+    })
+}
+
+/// Delete a contact with permission check
+/// @see AC-5.6.10.3 - Granular CRUD permissions (DeleteOwnContacts/DeleteAllContacts)
+/// @see AC-5.6.10.4 - Audit logging
+#[update]
+fn delete_contact(id: ContactId) -> Result<Contact, String> {
+    require_admin()?;
+    let caller = ic_cdk::caller();
+
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+
+        // Get contact to check ownership
+        let contact = s.get_contact(id)
+            .ok_or("Contact not found")?
+            .clone();
+
+        // Check permissions
+        let has_delete_all = s.has_permission(&caller, &AdminPermission::DeleteAllContacts);
+        let has_delete_own = s.has_permission(&caller, &AdminPermission::DeleteOwnContacts);
+        let is_owner = contact.owner_id.as_ref() == Some(&caller);
+
+        if !has_delete_all && !(has_delete_own && is_owner) {
+            return Err("Unauthorized: Cannot delete this contact".to_string());
+        }
+
+        // Audit log before deletion
+        s.record_audit_log(
+            caller,
+            "delete_contact",
+            "contact",
+            &id.to_string(),
+            Some(serde_json::json!({
+                "email": contact.email,
+                "name": contact.name,
+            }).to_string()),
+        );
+
+        // Perform deletion
+        s.delete_contact(id)
+            .ok_or("Failed to delete contact".to_string())
+    })
 }
 
 // =============================================================================
 // Deal API
 // =============================================================================
 
+/// Create a new deal (admin only)
+/// @see AC-5.6.10.1 - Sets owner_id to caller for row-level security
+/// @see AC-5.6.10.4 - Audit logging
 #[update]
 fn create_deal(request: CreateDealRequest) -> Result<Deal, String> {
     require_admin()?;
+    let caller = ic_cdk::caller();
 
     STATE.with(|state| {
-        state.borrow_mut().create_deal(request)
+        let mut s = state.borrow_mut();
+        let deal = s.create_deal(request.clone(), caller)?;
+
+        // Audit log
+        s.record_audit_log(
+            caller,
+            "create_deal",
+            "deal",
+            &deal.id.to_string(),
+            Some(serde_json::json!({
+                "contact_id": request.contact_id,
+                "name": request.name,
+                "value": request.value,
+            }).to_string()),
+        );
+
+        Ok(deal)
     })
 }
 
@@ -304,25 +595,165 @@ fn get_deal(id: DealId) -> Result<Option<Deal>, String> {
     Ok(STATE.with(|state| state.borrow().get_deal(id).cloned()))
 }
 
+/// Update deal stage with ownership check
+/// @see AC-5.6.10.3 - Granular CRUD permissions
+/// @see AC-5.6.10.4 - Audit logging
 #[update]
 fn update_deal_stage(id: DealId, stage: DealStage) -> Result<Deal, String> {
     require_admin()?;
+    let caller = ic_cdk::caller();
 
     STATE.with(|state| {
-        state.borrow_mut().update_deal_stage(id, stage)
-            .ok_or_else(|| "Deal not found".to_string())
+        let mut s = state.borrow_mut();
+
+        // Get deal to check ownership
+        let deal = s.get_deal(id)
+            .ok_or("Deal not found")?
+            .clone();
+
+        // Check permissions
+        let has_edit_all = s.has_permission(&caller, &AdminPermission::EditAllDeals);
+        let has_edit_own = s.has_permission(&caller, &AdminPermission::EditOwnDeals);
+        let is_owner = deal.owner_id.as_ref() == Some(&caller);
+
+        if !has_edit_all && !(has_edit_own && is_owner) {
+            return Err("Unauthorized: Cannot update this deal".to_string());
+        }
+
+        // Capture old stage for audit
+        let old_stage = format!("{:?}", deal.stage);
+
+        // Perform update
+        let updated = s.update_deal_stage(id, stage.clone())
+            .ok_or("Failed to update deal stage")?;
+
+        // Audit log
+        s.record_audit_log(
+            caller,
+            "update_deal_stage",
+            "deal",
+            &id.to_string(),
+            Some(serde_json::json!({
+                "old_stage": old_stage,
+                "new_stage": format!("{:?}", stage),
+            }).to_string()),
+        );
+
+        Ok(updated)
     })
 }
 
+/// Update a deal with permission check
+/// @see AC-5.6.10.3 - Granular CRUD permissions (EditOwnDeals/EditAllDeals)
+/// @see AC-5.6.10.4 - Audit logging
+#[update]
+fn update_deal(request: UpdateDealRequest) -> Result<Deal, String> {
+    require_admin()?;
+    let caller = ic_cdk::caller();
+
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+
+        // Get deal to check ownership
+        let deal = s.get_deal(request.id)
+            .ok_or("Deal not found")?
+            .clone();
+
+        // Check permissions
+        let has_edit_all = s.has_permission(&caller, &AdminPermission::EditAllDeals);
+        let has_edit_own = s.has_permission(&caller, &AdminPermission::EditOwnDeals);
+        let is_owner = deal.owner_id.as_ref() == Some(&caller);
+
+        if !has_edit_all && !(has_edit_own && is_owner) {
+            return Err("Unauthorized: Cannot edit this deal".to_string());
+        }
+
+        // Capture old values for audit
+        let old_values = serde_json::json!({
+            "name": deal.name,
+            "value": deal.value,
+            "stage": format!("{:?}", deal.stage),
+        }).to_string();
+
+        // Perform update
+        let updated = s.update_deal(
+            request.id,
+            request.name,
+            request.value,
+            request.stage,
+            request.notes,
+            request.expected_close_date,
+        ).ok_or("Failed to update deal")?;
+
+        // Audit log
+        s.record_audit_log(
+            caller,
+            "update_deal",
+            "deal",
+            &request.id.to_string(),
+            Some(old_values),
+        );
+
+        Ok(updated)
+    })
+}
+
+/// Delete a deal with permission check
+/// @see AC-5.6.10.3 - Granular CRUD permissions (DeleteOwnDeals/DeleteAllDeals)
+/// @see AC-5.6.10.4 - Audit logging
+#[update]
+fn delete_deal(id: DealId) -> Result<Deal, String> {
+    require_admin()?;
+    let caller = ic_cdk::caller();
+
+    STATE.with(|state| {
+        let mut s = state.borrow_mut();
+
+        // Get deal to check ownership
+        let deal = s.get_deal(id)
+            .ok_or("Deal not found")?
+            .clone();
+
+        // Check permissions
+        let has_delete_all = s.has_permission(&caller, &AdminPermission::DeleteAllDeals);
+        let has_delete_own = s.has_permission(&caller, &AdminPermission::DeleteOwnDeals);
+        let is_owner = deal.owner_id.as_ref() == Some(&caller);
+
+        if !has_delete_all && !(has_delete_own && is_owner) {
+            return Err("Unauthorized: Cannot delete this deal".to_string());
+        }
+
+        // Audit log before deletion
+        s.record_audit_log(
+            caller,
+            "delete_deal",
+            "deal",
+            &id.to_string(),
+            Some(serde_json::json!({
+                "name": deal.name,
+                "value": deal.value,
+                "contact_id": deal.contact_id,
+            }).to_string()),
+        );
+
+        // Perform deletion
+        s.delete_deal(id)
+            .ok_or("Failed to delete deal".to_string())
+    })
+}
+
+/// Get deals with row-level security filtering
+/// @see AC-5.6.10.1 - Row-level security filtering
 #[query]
 fn get_deals(
     filter: Option<DealFilter>,
     pagination: Option<PaginationParams>,
 ) -> Result<PaginatedResponse<Deal>, String> {
     require_admin()?;
+    let caller = ic_cdk::caller();
 
     Ok(STATE.with(|state| {
-        state.borrow().get_deals(filter, pagination.unwrap_or_default())
+        state.borrow().get_deals(filter, pagination.unwrap_or_default(), &caller)
     }))
 }
 
@@ -367,15 +798,45 @@ fn get_financial_summary(from: Timestamp, to: Timestamp) -> Result<FinancialSumm
 // Feature Flag API
 // =============================================================================
 
+/// Set feature flag with permission check and audit logging
+/// @see AC-5.6.10.5 - Feature flag audit logging
 #[update]
 fn set_feature_flag(request: SetFeatureFlagRequest) -> Result<(), String> {
     require_admin()?;
+    let caller = ic_cdk::caller();
 
     STATE.with(|state| {
-        state.borrow_mut().set_feature_flag(request);
-    });
+        let mut s = state.borrow_mut();
 
-    Ok(())
+        // Check ManageFeatureFlags permission
+        if !s.has_permission(&caller, &AdminPermission::ManageFeatureFlags) && !s.is_controller(&caller) {
+            return Err("Unauthorized: ManageFeatureFlags permission required".to_string());
+        }
+
+        // Get old value for audit
+        let old_value = s.get_feature_flag(&request.key).map(|f| serde_json::json!({
+            "enabled": f.enabled,
+            "percentage": f.percentage,
+        }).to_string());
+
+        // Perform update
+        s.set_feature_flag(request.clone());
+
+        // Audit log
+        s.record_audit_log(
+            caller,
+            "set_feature_flag",
+            "feature_flag",
+            &request.key,
+            Some(serde_json::json!({
+                "old_value": old_value.unwrap_or_else(|| "null".to_string()),
+                "new_enabled": request.enabled,
+                "new_percentage": request.percentage,
+            }).to_string()),
+        );
+
+        Ok(())
+    })
 }
 
 #[query]
