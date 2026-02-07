@@ -206,18 +206,23 @@ service : (opt vec principal) -> {
     // Admin Management
     add_admin : (principal) -> (variant { Ok; Err : text });
     remove_admin : (principal) -> (variant { Ok; Err : text });
-    get_admins : () -> (vec principal) query;
+    get_admins : () -> (variant { Ok : vec principal; Err : text }) query;
+
+    // Authorized Canister Management (FOS-5.6.8)
+    register_authorized_canister : (text, principal) -> (variant { Ok; Err : text });
+    unregister_authorized_canister : (text) -> (variant { Ok; Err : text });
+    list_authorized_canisters : () -> (variant { Ok : vec record { text; principal }; Err : text }) query;
 
     // Contact API
     create_contact : (CreateContactRequest) -> (variant { Ok : Contact; Err : text });
     create_contact_from_signup : (CreateContactRequest) -> (variant { Ok : Contact; Err : text });
-    get_contact : (ContactId) -> (opt Contact) query;
-    get_contact_by_email : (text) -> (opt Contact) query;
+    get_contact : (ContactId) -> (variant { Ok : opt Contact; Err : text }) query;
+    get_contact_by_email : (text) -> (variant { Ok : opt Contact; Err : text }) query;
     get_contacts : (opt ContactFilter, opt PaginationParams) -> (variant { Ok : PaginatedContactResponse; Err : text }) query;
 
     // Deal API
     create_deal : (CreateDealRequest) -> (variant { Ok : Deal; Err : text });
-    get_deal : (DealId) -> (opt Deal) query;
+    get_deal : (DealId) -> (variant { Ok : opt Deal; Err : text }) query;
     update_deal_stage : (DealId, DealStage) -> (variant { Ok : Deal; Err : text });
     get_deals : (opt DealFilter, opt PaginationParams) -> (variant { Ok : PaginatedDealResponse; Err : text }) query;
 
@@ -233,7 +238,7 @@ service : (opt vec principal) -> {
     list_feature_flags : () -> (variant { Ok : vec FeatureFlag; Err : text }) query;
 
     // Analytics API
-    log_activity : (text, text, opt text) -> ();
+    log_activity : (text, text, opt text) -> (variant { Ok; Err : text });
     record_metrics : (MetricsSnapshot) -> (variant { Ok; Err : text });
     list_metrics : (Timestamp, Timestamp, opt nat64) -> (variant { Ok : vec MetricsSnapshot; Err : text }) query;
     get_latest_metrics : () -> (variant { Ok : opt MetricsSnapshot; Err : text }) query;

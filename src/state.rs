@@ -3,12 +3,29 @@ use candid::Principal;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
+/// Time constants
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
+/// Rate limit configuration (FOS-5.6.8)
+/// - Window: 1 minute sliding window
+/// - Max calls: 100 per caller per window
+pub const RATE_LIMIT_WINDOW_NS: u64 = 60 * NANOSECONDS_PER_SECOND;
+pub const RATE_LIMIT_MAX_CALLS: usize = 100;
+
 /// State structure for the DAO Admin canister
 #[derive(Default)]
 pub struct State {
     // Access control
     pub controllers: Vec<Principal>,
     pub admins: Vec<Principal>,
+    /// Authorized canisters for inter-canister calls (role -> canister_id)
+    /// Roles: "user-service", "auth-service", etc.
+    pub authorized_canisters: BTreeMap<String, Principal>,
+
+    /// Rate limiting: caller -> list of timestamps (FOS-5.6.8)
+    /// NOTE: Intentionally NOT persisted in StableState - rate limits are ephemeral
+    /// and time-bound (1 minute window). Stale timestamps would be invalid after upgrade.
+    pub rate_limit_buckets: BTreeMap<Principal, Vec<u64>>,
 
     // CRM - Contacts
     pub contacts: BTreeMap<ContactId, Contact>,
@@ -38,6 +55,8 @@ impl State {
         Self {
             controllers: Vec::new(),
             admins: Vec::new(),
+            authorized_canisters: BTreeMap::new(),
+            rate_limit_buckets: BTreeMap::new(),
             contacts: BTreeMap::new(),
             contacts_by_email: BTreeMap::new(),
             contacts_by_user: BTreeMap::new(),
@@ -51,6 +70,49 @@ impl State {
             metrics_history: Vec::new(),
             feature_flags: BTreeMap::new(),
         }
+    }
+
+    // =========================================================================
+    // Rate Limiting (FOS-5.6.8 AC-4.2)
+    // =========================================================================
+
+    /// Check rate limit for a caller, returning Ok if allowed or Err with message
+    /// Also cleans up expired entries and records the new call if allowed
+    pub fn check_rate_limit(&mut self, caller: &Principal) -> Result<(), String> {
+        let now = ic_cdk::api::time();
+        let window_start = now.saturating_sub(RATE_LIMIT_WINDOW_NS);
+
+        // Get or create the bucket for this caller
+        let bucket = self.rate_limit_buckets.entry(*caller).or_default();
+
+        // Remove timestamps older than the window
+        bucket.retain(|&ts| ts >= window_start);
+
+        // Check if at limit
+        if bucket.len() >= RATE_LIMIT_MAX_CALLS {
+            return Err(format!(
+                "Rate limit exceeded: {} calls per minute allowed, try again later",
+                RATE_LIMIT_MAX_CALLS
+            ));
+        }
+
+        // Record this call
+        bucket.push(now);
+
+        Ok(())
+    }
+
+    /// Clean up rate limit buckets for principals with no recent activity
+    /// Call periodically to prevent memory bloat
+    pub fn cleanup_rate_limits(&mut self) {
+        let now = ic_cdk::api::time();
+        let window_start = now.saturating_sub(RATE_LIMIT_WINDOW_NS);
+
+        // Remove empty buckets and clean old entries
+        self.rate_limit_buckets.retain(|_, bucket| {
+            bucket.retain(|&ts| ts >= window_start);
+            !bucket.is_empty()
+        });
     }
 
     /// Check if a principal is a controller
@@ -73,6 +135,36 @@ impl State {
     /// Remove an admin
     pub fn remove_admin(&mut self, principal: &Principal) {
         self.admins.retain(|p| p != principal);
+    }
+
+    /// Register an authorized canister for inter-canister calls
+    pub fn register_authorized_canister(&mut self, role: String, canister_id: Principal) {
+        self.authorized_canisters.insert(role, canister_id);
+    }
+
+    /// Unregister an authorized canister
+    pub fn unregister_authorized_canister(&mut self, role: &str) {
+        self.authorized_canisters.remove(role);
+    }
+
+    /// Check if a principal is an authorized canister for the given role
+    pub fn is_authorized_canister(&self, role: &str, principal: &Principal) -> bool {
+        self.authorized_canisters
+            .get(role)
+            .map_or(false, |expected| expected == principal)
+    }
+
+    /// Check if a principal is any authorized canister
+    pub fn is_any_authorized_canister(&self, principal: &Principal) -> bool {
+        self.authorized_canisters.values().any(|p| p == principal)
+    }
+
+    /// Get all authorized canisters
+    pub fn get_authorized_canisters(&self) -> Vec<(String, Principal)> {
+        self.authorized_canisters
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
     }
 
     // =========================================================================
@@ -467,6 +559,8 @@ thread_local! {
 pub struct StableState {
     pub controllers: Vec<Principal>,
     pub admins: Vec<Principal>,
+    #[serde(default)]
+    pub authorized_canisters: Vec<(String, Principal)>,
     pub contacts: Vec<(ContactId, Contact)>,
     pub next_contact_id: ContactId,
     pub deals: Vec<(DealId, Deal)>,
@@ -483,6 +577,7 @@ impl From<&State> for StableState {
         StableState {
             controllers: state.controllers.clone(),
             admins: state.admins.clone(),
+            authorized_canisters: state.authorized_canisters.iter().map(|(k, v)| (k.clone(), *v)).collect(),
             contacts: state.contacts.iter().map(|(k, v)| (*k, v.clone())).collect(),
             next_contact_id: state.next_contact_id,
             deals: state.deals.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -500,6 +595,7 @@ impl From<StableState> for State {
         let mut state = State {
             controllers: stable.controllers,
             admins: stable.admins,
+            authorized_canisters: stable.authorized_canisters.iter().cloned().collect(),
             contacts: stable.contacts.iter().cloned().collect(),
             next_contact_id: stable.next_contact_id,
             deals: stable.deals.iter().cloned().collect(),

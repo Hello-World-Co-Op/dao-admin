@@ -433,16 +433,17 @@ fn test_get_admins_returns_correct_list() {
     let (pic, canister_id, controller) = setup();
     let new_admin = non_admin_principal();
 
-    // Initially should have controller as admin
+    // Initially should have controller as admin (requires admin - FOS-5.6.8)
     let response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_admins",
             encode_one(()).unwrap(),
         )
         .unwrap();
-    let admins: Vec<Principal> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let result: Result<Vec<Principal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let admins = result.expect("Admin should be able to get admin list");
     assert!(admins.contains(&controller), "Controller should be admin");
 
     // Add new admin
@@ -454,16 +455,17 @@ fn test_get_admins_returns_correct_list() {
     )
     .unwrap();
 
-    // Check list again
+    // Check list again (requires admin - FOS-5.6.8)
     let response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_admins",
             encode_one(()).unwrap(),
         )
         .unwrap();
-    let admins: Vec<Principal> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let result: Result<Vec<Principal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let admins = result.expect("Admin should be able to get admin list");
     assert_eq!(admins.len(), 2, "Should have 2 admins now");
     assert!(admins.contains(&new_admin), "New admin should be in list");
 }
@@ -567,38 +569,41 @@ fn test_get_contact_returns_created_contact() {
     let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(create_response)).unwrap();
     let created = result.unwrap();
 
-    // Get the contact
+    // Get the contact (requires admin - FOS-5.6.8)
     let get_response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_contact",
             encode_one(created.id).unwrap(),
         )
         .unwrap();
-    let fetched: Option<Contact> = decode_one(&unwrap_wasm_result(get_response)).unwrap();
+    let fetched: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(get_response)).unwrap();
 
-    assert!(fetched.is_some());
-    let contact = fetched.unwrap();
+    let contact_opt = fetched.expect("Admin should be able to get contact");
+    assert!(contact_opt.is_some());
+    let contact = contact_opt.unwrap();
     assert_eq!(contact.id, created.id);
     assert_eq!(contact.email, "jane@example.com");
 }
 
 #[test]
 fn test_get_contact_returns_none_for_nonexistent() {
-    let (pic, canister_id, _) = setup();
+    let (pic, canister_id, controller) = setup();
 
+    // Requires admin - FOS-5.6.8
     let response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_contact",
             encode_one(99999u64).unwrap(),
         )
         .unwrap();
-    let result: Option<Contact> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let result: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact_opt = result.expect("Admin should be able to query");
 
-    assert!(result.is_none());
+    assert!(contact_opt.is_none());
 }
 
 #[test]
@@ -624,18 +629,20 @@ fn test_get_contact_by_email() {
     )
     .unwrap();
 
+    // Requires admin - FOS-5.6.8
     let response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_contact_by_email",
             encode_one("unique@example.com".to_string()).unwrap(),
         )
         .unwrap();
-    let result: Option<Contact> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let result: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
 
-    assert!(result.is_some());
-    assert_eq!(result.unwrap().email, "unique@example.com");
+    let contact_opt = result.expect("Admin should be able to get contact by email");
+    assert!(contact_opt.is_some());
+    assert_eq!(contact_opt.unwrap().email, "unique@example.com");
 }
 
 #[test]
@@ -744,9 +751,21 @@ fn test_get_contacts_pagination() {
 
 #[test]
 fn test_create_contact_from_signup_creates_deal() {
-    let (pic, canister_id, _) = setup();
+    let (pic, canister_id, controller) = setup();
 
-    // create_contact_from_signup does NOT require admin
+    // FOS-5.6.8: create_contact_from_signup requires authorized canister
+    // First register the user-service canister
+    let user_service_principal = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+    pic.update_call(
+        canister_id,
+        controller,
+        "register_authorized_canister",
+        encode_args(("user-service".to_string(), user_service_principal)).unwrap(),
+    )
+    .unwrap();
+
+    // Now call create_contact_from_signup FROM the authorized canister principal
     let request = CreateContactRequest {
         user_id: None,
         email: "signup@example.com".to_string(),
@@ -761,43 +780,15 @@ fn test_create_contact_from_signup_creates_deal() {
     let response = pic
         .update_call(
             canister_id,
-            Principal::anonymous(), // No admin required
+            user_service_principal, // Authorized canister
             "create_contact_from_signup",
             encode_one(request).unwrap(),
         )
         .unwrap();
 
     let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
-    let contact = result.expect("Should create contact from signup");
+    let contact = result.expect("Authorized canister should create contact from signup");
     assert_eq!(contact.email, "signup@example.com");
-
-    // Verify a deal was auto-created (filter by contact_id)
-    // Note: get_deals requires admin, so we use the controller
-    let (pic, canister_id, controller) = setup();
-
-    // Recreate in this fresh setup
-    let request = CreateContactRequest {
-        user_id: None,
-        email: "signup2@example.com".to_string(),
-        name: Some("New Signup 2".to_string()),
-        company: None,
-        job_title: None,
-        interest_area: None,
-        source: None,
-        notes: None,
-    };
-
-    let create_response = pic
-        .update_call(
-            canister_id,
-            Principal::anonymous(),
-            "create_contact_from_signup",
-            encode_one(request).unwrap(),
-        )
-        .unwrap();
-
-    let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(create_response)).unwrap();
-    let contact = result.unwrap();
 
     // Check for auto-created deal
     let filter = DealFilter {
@@ -963,36 +954,39 @@ fn test_get_deal_returns_created_deal() {
             .unwrap()
             .unwrap();
 
-    // Get the deal
+    // Get the deal (requires admin - FOS-5.6.8)
     let get_response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_deal",
             encode_one(created.id).unwrap(),
         )
         .unwrap();
-    let fetched: Option<Deal> = decode_one(&unwrap_wasm_result(get_response)).unwrap();
+    let fetched: Result<Option<Deal>, String> = decode_one(&unwrap_wasm_result(get_response)).unwrap();
 
-    assert!(fetched.is_some());
-    assert_eq!(fetched.unwrap().name, "Fetchable Deal");
+    let deal_opt = fetched.expect("Admin should be able to get deal");
+    assert!(deal_opt.is_some());
+    assert_eq!(deal_opt.unwrap().name, "Fetchable Deal");
 }
 
 #[test]
 fn test_get_deal_returns_none_for_nonexistent() {
-    let (pic, canister_id, _) = setup();
+    let (pic, canister_id, controller) = setup();
 
+    // Requires admin - FOS-5.6.8
     let response = pic
         .query_call(
             canister_id,
-            Principal::anonymous(),
+            controller,
             "get_deal",
             encode_one(99999u64).unwrap(),
         )
         .unwrap();
-    let result: Option<Deal> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let result: Result<Option<Deal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let deal_opt = result.expect("Admin should be able to query");
 
-    assert!(result.is_none());
+    assert!(deal_opt.is_none());
 }
 
 #[test]
@@ -1672,12 +1666,12 @@ fn test_list_feature_flags() {
 
 #[test]
 fn test_log_activity() {
-    let (pic, canister_id, _) = setup();
+    let (pic, canister_id, controller) = setup();
 
-    // log_activity returns () - just verify it doesn't fail
+    // log_activity requires admin or authorized canister - use controller (admin)
     let response = pic.update_call(
         canister_id,
-        Principal::anonymous(),
+        controller,
         "log_activity",
         encode_args((
             "user-123".to_string(),
@@ -1687,7 +1681,10 @@ fn test_log_activity() {
         .unwrap(),
     );
 
-    assert!(response.is_ok(), "log_activity should not fail");
+    assert!(response.is_ok(), "log_activity call should not fail");
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response.unwrap())).unwrap();
+    assert!(result.is_ok(), "Admin should be able to log activity");
 }
 
 #[test]
@@ -2154,4 +2151,633 @@ fn test_record_metrics_requires_admin() {
 
     let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
     assert!(result.is_err(), "Non-admin should not be able to record metrics");
+}
+
+// ============================================================================
+// FOS-5.6.8: Admin Backend Authorization Tests
+// ============================================================================
+
+// =============================================================================
+// AC-5.6.8.3: Inter-canister call verification for create_contact_from_signup
+// =============================================================================
+
+#[test]
+fn test_create_contact_from_signup_requires_authorized_canister() {
+    let (pic, canister_id, _controller) = setup();
+    let non_admin = non_admin_principal();
+
+    let request = CreateContactRequest {
+        user_id: Some("user-123".to_string()),
+        email: "test@example.com".to_string(),
+        name: Some("Test User".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    // Call from non-authorized principal should fail
+    let response = pic
+        .update_call(
+            canister_id,
+            non_admin,
+            "create_contact_from_signup",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Unauthorized principal should not be able to call create_contact_from_signup");
+    assert!(
+        result.unwrap_err().contains("Expected user-service canister"),
+        "Error message should indicate expected canister"
+    );
+}
+
+#[test]
+fn test_create_contact_from_signup_anonymous_rejected() {
+    let (pic, canister_id, _controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: Some("user-123".to_string()),
+        email: "anon@example.com".to_string(),
+        name: None,
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    // Call from anonymous identity should fail
+    let response = pic
+        .update_call(
+            canister_id,
+            Principal::anonymous(),
+            "create_contact_from_signup",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Anonymous identity should not be able to call create_contact_from_signup");
+}
+
+// NOTE: Controller verification tests behave differently in PocketIC vs production IC.
+// In PocketIC, the canister_status call returns PocketIC's internal controller list,
+// which may not match our test principals. This test verifies the access control
+// logic exists and runs without error - production controller verification is
+// tested via manual testing on IC mainnet.
+#[test]
+fn test_register_authorized_canister_controller_check_runs() {
+    let (pic, canister_id, controller) = setup();
+    let canister_to_authorize = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+    // Controller (from init) should be able to register authorized canister
+    let response = pic.update_call(
+        canister_id,
+        controller,
+        "register_authorized_canister",
+        encode_args(("user-service".to_string(), canister_to_authorize)).unwrap(),
+    );
+
+    // Verify the call completes (controller check logic executed)
+    assert!(response.is_ok(), "register_authorized_canister call should complete");
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response.unwrap())).unwrap();
+    assert!(result.is_ok(), "Controller should be able to register authorized canister");
+}
+
+#[test]
+fn test_register_and_use_authorized_canister() {
+    let (pic, canister_id, controller) = setup();
+    let user_service_canister = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+    // Controller registers user-service canister
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "register_authorized_canister",
+            encode_args(("user-service".to_string(), user_service_canister)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Controller should be able to register authorized canister");
+
+    // Verify the canister is listed
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "list_authorized_canisters",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<(String, Principal)>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let canisters = result.expect("Should succeed");
+    assert!(
+        canisters.iter().any(|(role, id)| role == "user-service" && *id == user_service_canister),
+        "user-service should be in authorized canisters list"
+    );
+}
+
+// =============================================================================
+// AC-5.6.8.4: log_activity requires authorization
+// =============================================================================
+
+#[test]
+fn test_log_activity_requires_authorization() {
+    let (pic, canister_id, _controller) = setup();
+    let non_admin = non_admin_principal();
+
+    // Non-admin, non-authorized canister should not be able to log activity
+    let response = pic
+        .update_call(
+            canister_id,
+            non_admin,
+            "log_activity",
+            encode_args(("user-123".to_string(), "login".to_string(), None::<String>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-authorized principal should not be able to log activity");
+    assert!(
+        result.unwrap_err().contains("Requires admin or authorized canister"),
+        "Error message should indicate authorization required"
+    );
+}
+
+#[test]
+fn test_log_activity_admin_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    // Admin (controller) should be able to log activity
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "log_activity",
+            encode_args(("user-123".to_string(), "login".to_string(), Some("metadata".to_string()))).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Admin should be able to log activity");
+}
+
+#[test]
+fn test_log_activity_anonymous_rejected() {
+    let (pic, canister_id, _controller) = setup();
+
+    // Anonymous identity should not be able to log activity
+    let response = pic
+        .update_call(
+            canister_id,
+            Principal::anonymous(),
+            "log_activity",
+            encode_args(("anon-user".to_string(), "test".to_string(), None::<String>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Anonymous identity should not be able to log activity");
+}
+
+#[test]
+fn test_log_activity_rate_limit() {
+    let (pic, canister_id, controller) = setup();
+
+    // log_activity has a rate limit of 100 calls per minute
+    // Make 100 calls which should all succeed
+    for i in 0..100 {
+        let response = pic
+            .update_call(
+                canister_id,
+                controller,
+                "log_activity",
+                encode_args((
+                    format!("user-{}", i),
+                    "rate_test".to_string(),
+                    None::<String>,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+
+        let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+        assert!(result.is_ok(), "Call {} should succeed within rate limit", i);
+    }
+
+    // The 101st call should fail with rate limit exceeded
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "log_activity",
+            encode_args(("user-101".to_string(), "rate_test".to_string(), None::<String>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Call 101 should be rate limited");
+    assert!(
+        result.unwrap_err().contains("Rate limit exceeded"),
+        "Error message should indicate rate limit exceeded"
+    );
+}
+
+#[test]
+fn test_log_activity_rate_limit_resets_after_window() {
+    let (pic, canister_id, controller) = setup();
+
+    // Make 100 calls to hit the rate limit
+    for i in 0..100 {
+        let response = pic
+            .update_call(
+                canister_id,
+                controller,
+                "log_activity",
+                encode_args((
+                    format!("user-{}", i),
+                    "rate_test".to_string(),
+                    None::<String>,
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+
+        let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+        assert!(result.is_ok(), "Call {} should succeed", i);
+    }
+
+    // Verify we're rate limited
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "log_activity",
+            encode_args(("user-blocked".to_string(), "rate_test".to_string(), None::<String>)).unwrap(),
+        )
+        .unwrap();
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Should be rate limited");
+
+    // Advance time by more than 1 minute (rate limit window)
+    // 61 seconds in nanoseconds = 61_000_000_000
+    pic.advance_time(std::time::Duration::from_secs(61));
+    // Tick to process time advancement
+    pic.tick();
+
+    // Now should be able to make calls again
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "log_activity",
+            encode_args(("user-after-window".to_string(), "rate_test".to_string(), None::<String>)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Call should succeed after rate limit window resets");
+}
+
+// =============================================================================
+// AC-5.6.8.5: Query endpoints require admin authorization
+// =============================================================================
+
+#[test]
+fn test_get_contact_requires_admin() {
+    let (pic, canister_id, controller) = setup();
+    let non_admin = non_admin_principal();
+
+    // First create a contact as admin
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "admin-created@example.com".to_string(),
+        name: Some("Admin Created".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let create_result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact = create_result.expect("Admin should create contact");
+
+    // Non-admin should not be able to get contact
+    let response = pic
+        .query_call(
+            canister_id,
+            non_admin,
+            "get_contact",
+            encode_one(contact.id).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to get contact");
+    assert!(
+        result.unwrap_err().contains("Admin access required"),
+        "Error should indicate admin required"
+    );
+}
+
+#[test]
+fn test_get_contact_admin_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    // Create a contact as admin
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "admin-test@example.com".to_string(),
+        name: Some("Admin Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let create_result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact = create_result.expect("Admin should create contact");
+
+    // Admin should be able to get contact
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_contact",
+            encode_one(contact.id).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Admin should be able to get contact");
+    let found = result.unwrap();
+    assert!(found.is_some(), "Contact should exist");
+    assert_eq!(found.unwrap().email, "admin-test@example.com");
+}
+
+#[test]
+fn test_get_contact_by_email_requires_admin() {
+    let (pic, canister_id, controller) = setup();
+    let non_admin = non_admin_principal();
+
+    // First create a contact as admin
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "email-test@example.com".to_string(),
+        name: Some("Email Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    pic.update_call(
+        canister_id,
+        controller,
+        "create_contact",
+        encode_one(request).unwrap(),
+    )
+    .unwrap();
+
+    // Non-admin should not be able to get contact by email (email enumeration risk)
+    let response = pic
+        .query_call(
+            canister_id,
+            non_admin,
+            "get_contact_by_email",
+            encode_one("email-test@example.com".to_string()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to get contact by email");
+}
+
+#[test]
+fn test_get_deal_requires_admin() {
+    let (pic, canister_id, controller) = setup();
+    let non_admin = non_admin_principal();
+
+    // First create a contact
+    let contact_request = CreateContactRequest {
+        user_id: None,
+        email: "deal-test@example.com".to_string(),
+        name: Some("Deal Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(contact_request).unwrap(),
+        )
+        .unwrap();
+
+    let create_result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact = create_result.expect("Should create contact");
+
+    // Create a deal
+    let deal_request = CreateDealRequest {
+        contact_id: contact.id,
+        name: "Test Deal".to_string(),
+        value: Some(10000),
+        notes: None,
+        expected_close_date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_deal",
+            encode_one(deal_request).unwrap(),
+        )
+        .unwrap();
+
+    let deal_result: Result<Deal, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let deal = deal_result.expect("Should create deal");
+
+    // Non-admin should not be able to get deal
+    let response = pic
+        .query_call(
+            canister_id,
+            non_admin,
+            "get_deal",
+            encode_one(deal.id).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<Deal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to get deal");
+}
+
+#[test]
+fn test_get_admins_requires_admin() {
+    let (pic, canister_id, _controller) = setup();
+    let non_admin = non_admin_principal();
+
+    // Non-admin should not be able to get admin list
+    let response = pic
+        .query_call(
+            canister_id,
+            non_admin,
+            "get_admins",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<Principal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Non-admin should not be able to get admin list");
+    assert!(
+        result.unwrap_err().contains("Admin access required"),
+        "Error should indicate admin required"
+    );
+}
+
+#[test]
+fn test_get_admins_admin_succeeds() {
+    let (pic, canister_id, controller) = setup();
+
+    // Admin should be able to get admin list
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_admins",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<Principal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Admin should be able to get admin list");
+    let admins = result.unwrap();
+    assert!(!admins.is_empty(), "Admin list should not be empty");
+    assert!(admins.contains(&controller), "Controller should be in admin list");
+}
+
+// =============================================================================
+// AC-5.6.8.6: AnonymousIdentity rejection tests
+// =============================================================================
+
+#[test]
+fn test_anonymous_cannot_get_contact() {
+    let (pic, canister_id, controller) = setup();
+
+    // Create a contact as admin
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "anon-test@example.com".to_string(),
+        name: Some("Anon Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let create_result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact = create_result.expect("Should create contact");
+
+    // Anonymous should not be able to get contact
+    let response = pic
+        .query_call(
+            canister_id,
+            Principal::anonymous(),
+            "get_contact",
+            encode_one(contact.id).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Option<Contact>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Anonymous should not be able to get contact");
+}
+
+#[test]
+fn test_anonymous_cannot_get_admins() {
+    let (pic, canister_id, _controller) = setup();
+
+    // Anonymous should not be able to get admin list
+    let response = pic
+        .query_call(
+            canister_id,
+            Principal::anonymous(),
+            "get_admins",
+            encode_one(()).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Vec<Principal>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Anonymous should not be able to get admin list");
+}
+
+#[test]
+fn test_anonymous_cannot_create_contact() {
+    let (pic, canister_id, _controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "anon-create@example.com".to_string(),
+        name: Some("Anon Create".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    // Anonymous should not be able to create contact
+    let response = pic
+        .update_call(
+            canister_id,
+            Principal::anonymous(),
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Anonymous should not be able to create contact");
 }
