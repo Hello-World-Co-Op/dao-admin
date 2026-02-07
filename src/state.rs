@@ -22,6 +22,10 @@ pub struct State {
     /// Roles: "user-service", "auth-service", etc.
     pub authorized_canisters: BTreeMap<String, Principal>,
 
+    /// Granular admin permissions (FOS-5.6.10)
+    /// @see AC-5.6.10.3 - Granular CRUD permissions
+    pub admin_permissions: BTreeMap<Principal, Vec<AdminPermission>>,
+
     /// Rate limiting: caller -> list of timestamps (FOS-5.6.8)
     /// NOTE: Intentionally NOT persisted in StableState - rate limits are ephemeral
     /// and time-bound (1 minute window). Stale timestamps would be invalid after upgrade.
@@ -48,6 +52,11 @@ pub struct State {
 
     // Feature Flags
     pub feature_flags: BTreeMap<String, FeatureFlag>,
+
+    // Audit Log (FOS-5.6.10)
+    /// @see AC-5.6.10.4, AC-5.6.10.5 - Audit logging
+    pub audit_log: Vec<AuditLogEntry>,
+    pub next_audit_log_id: u64,
 }
 
 impl State {
@@ -56,6 +65,7 @@ impl State {
             controllers: Vec::new(),
             admins: Vec::new(),
             authorized_canisters: BTreeMap::new(),
+            admin_permissions: BTreeMap::new(),
             rate_limit_buckets: BTreeMap::new(),
             contacts: BTreeMap::new(),
             contacts_by_email: BTreeMap::new(),
@@ -69,6 +79,8 @@ impl State {
             activity_log: Vec::new(),
             metrics_history: Vec::new(),
             feature_flags: BTreeMap::new(),
+            audit_log: Vec::new(),
+            next_audit_log_id: 1,
         }
     }
 
@@ -168,11 +180,126 @@ impl State {
     }
 
     // =========================================================================
+    // Permission Operations (FOS-5.6.10)
+    // =========================================================================
+
+    /// Check if a principal has a specific permission
+    /// Controllers have all permissions implicitly
+    /// @see AC-5.6.10.3 - Granular CRUD permissions
+    pub fn has_permission(&self, principal: &Principal, permission: &AdminPermission) -> bool {
+        // Controllers have all permissions
+        if self.controllers.contains(principal) {
+            return true;
+        }
+
+        // Check explicit permissions
+        self.admin_permissions
+            .get(principal)
+            .map_or(false, |perms| perms.contains(permission))
+    }
+
+    /// Grant a permission to a principal
+    pub fn grant_permission(&mut self, principal: Principal, permission: AdminPermission) {
+        self.admin_permissions
+            .entry(principal)
+            .or_default()
+            .push(permission);
+    }
+
+    /// Revoke a permission from a principal
+    pub fn revoke_permission(&mut self, principal: &Principal, permission: &AdminPermission) {
+        if let Some(perms) = self.admin_permissions.get_mut(principal) {
+            perms.retain(|p| p != permission);
+        }
+    }
+
+    /// Get all permissions for a principal
+    pub fn get_permissions(&self, principal: &Principal) -> Vec<AdminPermission> {
+        self.admin_permissions
+            .get(principal)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Grant default permissions to a new admin (view own + edit own)
+    pub fn grant_default_permissions(&mut self, principal: Principal) {
+        let default_perms = vec![
+            AdminPermission::ViewOwnContacts,
+            AdminPermission::EditOwnContacts,
+            AdminPermission::ViewOwnDeals,
+            AdminPermission::EditOwnDeals,
+        ];
+
+        for perm in default_perms {
+            if !self.has_permission(&principal, &perm) {
+                self.grant_permission(principal, perm);
+            }
+        }
+    }
+
+    // =========================================================================
+    // Audit Log Operations (FOS-5.6.10)
+    // =========================================================================
+
+    /// Record an audit log entry
+    /// @see AC-5.6.10.4, AC-5.6.10.5 - Audit logging
+    pub fn record_audit_log(
+        &mut self,
+        actor: Principal,
+        action: &str,
+        target_type: &str,
+        target_id: &str,
+        details: Option<String>,
+    ) {
+        let entry = AuditLogEntry {
+            id: self.next_audit_log_id,
+            timestamp: ic_cdk::api::time(),
+            actor,
+            action: action.to_string(),
+            target_type: target_type.to_string(),
+            target_id: target_id.to_string(),
+            details,
+        };
+
+        self.next_audit_log_id += 1;
+        self.audit_log.push(entry);
+
+        // Keep only last 10000 entries
+        if self.audit_log.len() > 10000 {
+            self.audit_log.drain(0..1000);
+        }
+    }
+
+    /// Get audit log entries with optional filtering
+    pub fn get_audit_log(
+        &self,
+        action_filter: Option<&str>,
+        target_type_filter: Option<&str>,
+        actor_filter: Option<&Principal>,
+        limit: Option<u64>,
+    ) -> Vec<AuditLogEntry> {
+        let limit = limit.unwrap_or(100) as usize;
+
+        self.audit_log
+            .iter()
+            .rev()
+            .filter(|entry| {
+                action_filter.map_or(true, |a| entry.action == a)
+                    && target_type_filter.map_or(true, |t| entry.target_type == t)
+                    && actor_filter.map_or(true, |p| &entry.actor == p)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    // =========================================================================
     // Contact Operations
     // =========================================================================
 
     /// Create a new contact
-    pub fn create_contact(&mut self, request: CreateContactRequest) -> Contact {
+    /// @see AC-5.6.10.1 - Sets owner_id to caller for row-level security
+    pub fn create_contact(&mut self, request: CreateContactRequest, caller: Principal) -> Contact {
         let now = ic_cdk::api::time();
         let id = self.next_contact_id;
         self.next_contact_id += 1;
@@ -188,6 +315,8 @@ impl State {
             source: request.source.unwrap_or_default(),
             notes: request.notes,
             status: ContactStatus::Active,
+            owner_id: Some(caller),
+            team_id: None,
             created_at: now,
             updated_at: now,
         };
@@ -213,13 +342,91 @@ impl State {
             .and_then(|id| self.contacts.get(id))
     }
 
-    /// Get contacts with filter
+    /// Update a contact
+    /// @see AC-5.6.10.3 - Granular CRUD permissions
+    pub fn update_contact(
+        &mut self,
+        id: ContactId,
+        name: Option<String>,
+        company: Option<String>,
+        job_title: Option<String>,
+        interest_area: Option<String>,
+        notes: Option<String>,
+        status: Option<ContactStatus>,
+    ) -> Option<Contact> {
+        let contact = self.contacts.get_mut(&id)?;
+
+        if let Some(n) = name {
+            contact.name = Some(n);
+        }
+        if let Some(c) = company {
+            contact.company = Some(c);
+        }
+        if let Some(j) = job_title {
+            contact.job_title = Some(j);
+        }
+        if let Some(i) = interest_area {
+            contact.interest_area = Some(i);
+        }
+        if let Some(n) = notes {
+            contact.notes = Some(n);
+        }
+        if let Some(s) = status {
+            contact.status = s;
+        }
+
+        contact.updated_at = ic_cdk::api::time();
+        Some(contact.clone())
+    }
+
+    /// Delete a contact
+    /// @see AC-5.6.10.3 - Granular CRUD permissions
+    pub fn delete_contact(&mut self, id: ContactId) -> Option<Contact> {
+        let contact = self.contacts.remove(&id)?;
+
+        // Remove from indexes
+        self.contacts_by_email.remove(&contact.email.to_lowercase());
+        if let Some(ref user_id) = contact.user_id {
+            self.contacts_by_user.remove(user_id);
+        }
+
+        // Remove associated deals
+        if let Some(deal_ids) = self.deals_by_contact.remove(&id) {
+            for deal_id in deal_ids {
+                self.deals.remove(&deal_id);
+            }
+        }
+
+        Some(contact)
+    }
+
+    /// Get contacts with filter and row-level security
+    /// @see AC-5.6.10.1 - Row-level security filtering
     pub fn get_contacts(
         &self,
         filter: Option<ContactFilter>,
         pagination: PaginationParams,
+        caller: &Principal,
     ) -> PaginatedResponse<Contact> {
+        let has_view_all = self.has_permission(caller, &AdminPermission::ViewAllContacts);
+        let has_view_own = self.has_permission(caller, &AdminPermission::ViewOwnContacts);
+
+        // If no view permissions, return empty
+        if !has_view_all && !has_view_own {
+            return PaginatedResponse {
+                items: Vec::new(),
+                total: 0,
+                offset: pagination.offset.unwrap_or(0),
+                limit: pagination.limit.unwrap_or(50),
+            };
+        }
+
         let mut contacts: Vec<Contact> = self.contacts.values().cloned().collect();
+
+        // Apply row-level security if not ViewAllContacts
+        if !has_view_all {
+            contacts.retain(|c| c.owner_id.as_ref() == Some(caller));
+        }
 
         if let Some(ref f) = filter {
             if let Some(ref status) = f.status {
@@ -261,7 +468,8 @@ impl State {
     // =========================================================================
 
     /// Create a new deal
-    pub fn create_deal(&mut self, request: CreateDealRequest) -> Result<Deal, String> {
+    /// @see AC-5.6.10.1 - Sets owner_id and created_by to caller for row-level security
+    pub fn create_deal(&mut self, request: CreateDealRequest, caller: Principal) -> Result<Deal, String> {
         if !self.contacts.contains_key(&request.contact_id) {
             return Err("Contact not found".to_string());
         }
@@ -278,6 +486,8 @@ impl State {
             stage: DealStage::Lead,
             notes: request.notes,
             expected_close_date: request.expected_close_date,
+            owner_id: Some(caller),
+            created_by: Some(caller),
             created_at: now,
             updated_at: now,
         };
@@ -304,13 +514,79 @@ impl State {
         Some(deal.clone())
     }
 
-    /// Get deals with filter
+    /// Update a deal
+    /// @see AC-5.6.10.3 - Granular CRUD permissions
+    pub fn update_deal(
+        &mut self,
+        id: DealId,
+        name: Option<String>,
+        value: Option<u64>,
+        stage: Option<DealStage>,
+        notes: Option<String>,
+        expected_close_date: Option<Timestamp>,
+    ) -> Option<Deal> {
+        let deal = self.deals.get_mut(&id)?;
+
+        if let Some(n) = name {
+            deal.name = n;
+        }
+        if let Some(v) = value {
+            deal.value = Some(v);
+        }
+        if let Some(s) = stage {
+            deal.stage = s;
+        }
+        if let Some(n) = notes {
+            deal.notes = Some(n);
+        }
+        if let Some(d) = expected_close_date {
+            deal.expected_close_date = Some(d);
+        }
+
+        deal.updated_at = ic_cdk::api::time();
+        Some(deal.clone())
+    }
+
+    /// Delete a deal
+    /// @see AC-5.6.10.3 - Granular CRUD permissions
+    pub fn delete_deal(&mut self, id: DealId) -> Option<Deal> {
+        let deal = self.deals.remove(&id)?;
+
+        // Remove from contact's deal list
+        if let Some(deal_ids) = self.deals_by_contact.get_mut(&deal.contact_id) {
+            deal_ids.retain(|&did| did != id);
+        }
+
+        Some(deal)
+    }
+
+    /// Get deals with filter and row-level security
+    /// @see AC-5.6.10.1 - Row-level security filtering
     pub fn get_deals(
         &self,
         filter: Option<DealFilter>,
         pagination: PaginationParams,
+        caller: &Principal,
     ) -> PaginatedResponse<Deal> {
+        let has_view_all = self.has_permission(caller, &AdminPermission::ViewAllDeals);
+        let has_view_own = self.has_permission(caller, &AdminPermission::ViewOwnDeals);
+
+        // If no view permissions, return empty
+        if !has_view_all && !has_view_own {
+            return PaginatedResponse {
+                items: Vec::new(),
+                total: 0,
+                offset: pagination.offset.unwrap_or(0),
+                limit: pagination.limit.unwrap_or(50),
+            };
+        }
+
         let mut deals: Vec<Deal> = self.deals.values().cloned().collect();
+
+        // Apply row-level security if not ViewAllDeals
+        if !has_view_all {
+            deals.retain(|d| d.owner_id.as_ref() == Some(caller));
+        }
 
         if let Some(ref f) = filter {
             if let Some(ref stage) = f.stage {
@@ -498,6 +774,45 @@ impl State {
     // Analytics Operations
     // =========================================================================
 
+    // =========================================================================
+    // Migration Operations (FOS-5.6.10)
+    // =========================================================================
+
+    /// Migrate existing contacts and deals without owner_id
+    /// Sets owner_id to the first admin if not already set
+    /// @see AC-5.6.10.1 - Migration for row-level security
+    pub fn migrate_ownership(&mut self) {
+        let first_admin = self.admins.first().cloned();
+
+        if let Some(admin) = first_admin {
+            // Migrate contacts
+            for contact in self.contacts.values_mut() {
+                if contact.owner_id.is_none() {
+                    contact.owner_id = Some(admin);
+                }
+            }
+
+            // Migrate deals
+            for deal in self.deals.values_mut() {
+                if deal.owner_id.is_none() {
+                    deal.owner_id = Some(admin);
+                }
+                if deal.created_by.is_none() {
+                    deal.created_by = Some(admin);
+                }
+            }
+
+            ic_cdk::println!("Migrated ownership for {} contacts and {} deals to admin {}",
+                self.contacts.len(), self.deals.len(), admin);
+        } else {
+            ic_cdk::println!("No admins found, skipping ownership migration");
+        }
+    }
+
+    // =========================================================================
+    // Analytics Operations
+    // =========================================================================
+
     /// Log user activity
     pub fn log_activity(&mut self, user_id: String, action: String, metadata: Option<String>) {
         let activity = UserActivity {
@@ -561,6 +876,9 @@ pub struct StableState {
     pub admins: Vec<Principal>,
     #[serde(default)]
     pub authorized_canisters: Vec<(String, Principal)>,
+    /// Admin permissions (FOS-5.6.10)
+    #[serde(default)]
+    pub admin_permissions: Vec<(Principal, Vec<AdminPermission>)>,
     pub contacts: Vec<(ContactId, Contact)>,
     pub next_contact_id: ContactId,
     pub deals: Vec<(DealId, Deal)>,
@@ -570,6 +888,11 @@ pub struct StableState {
     pub feature_flags: Vec<(String, FeatureFlag)>,
     #[serde(default)]
     pub metrics_history: Vec<MetricsSnapshot>,
+    /// Audit log (FOS-5.6.10)
+    #[serde(default)]
+    pub audit_log: Vec<AuditLogEntry>,
+    #[serde(default)]
+    pub next_audit_log_id: u64,
 }
 
 impl From<&State> for StableState {
@@ -578,6 +901,7 @@ impl From<&State> for StableState {
             controllers: state.controllers.clone(),
             admins: state.admins.clone(),
             authorized_canisters: state.authorized_canisters.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            admin_permissions: state.admin_permissions.iter().map(|(k, v)| (*k, v.clone())).collect(),
             contacts: state.contacts.iter().map(|(k, v)| (*k, v.clone())).collect(),
             next_contact_id: state.next_contact_id,
             deals: state.deals.iter().map(|(k, v)| (*k, v.clone())).collect(),
@@ -586,6 +910,8 @@ impl From<&State> for StableState {
             next_transaction_id: state.next_transaction_id,
             feature_flags: state.feature_flags.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             metrics_history: state.metrics_history.clone(),
+            audit_log: state.audit_log.clone(),
+            next_audit_log_id: state.next_audit_log_id,
         }
     }
 }
@@ -596,6 +922,7 @@ impl From<StableState> for State {
             controllers: stable.controllers,
             admins: stable.admins,
             authorized_canisters: stable.authorized_canisters.iter().cloned().collect(),
+            admin_permissions: stable.admin_permissions.iter().cloned().collect(),
             contacts: stable.contacts.iter().cloned().collect(),
             next_contact_id: stable.next_contact_id,
             deals: stable.deals.iter().cloned().collect(),
@@ -604,6 +931,8 @@ impl From<StableState> for State {
             next_transaction_id: stable.next_transaction_id,
             feature_flags: stable.feature_flags.iter().cloned().collect(),
             metrics_history: stable.metrics_history,
+            audit_log: stable.audit_log,
+            next_audit_log_id: if stable.next_audit_log_id == 0 { 1 } else { stable.next_audit_log_id },
             ..Default::default()
         };
 

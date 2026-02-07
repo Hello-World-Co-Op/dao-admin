@@ -353,7 +353,7 @@ fn create_contact(request: CreateContactRequest) -> Result<Contact, String> {
         contact
     });
 
-    ic_cdk::println!("Created contact {}: {}", contact.id, contact.email);
+    ic_cdk::println!("Created contact {}", contact.id);
     Ok(contact)
 }
 

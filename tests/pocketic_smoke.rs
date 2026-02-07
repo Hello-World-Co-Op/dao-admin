@@ -246,6 +246,113 @@ struct AdminStats {
     active_feature_flags: u64,
 }
 
+// FOS-5.6.10 - New types for permissions and audit logging
+
+/// Updated Contact with owner_id and team_id
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct ContactV2 {
+    id: ContactId,
+    user_id: Option<String>,
+    email: String,
+    name: Option<String>,
+    company: Option<String>,
+    job_title: Option<String>,
+    interest_area: Option<String>,
+    source: ContactSource,
+    notes: Option<String>,
+    status: ContactStatus,
+    owner_id: Option<Principal>,
+    team_id: Option<String>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+}
+
+/// Updated Deal with owner_id and created_by
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct DealV2 {
+    id: DealId,
+    contact_id: ContactId,
+    name: String,
+    value: Option<u64>,
+    stage: DealStage,
+    notes: Option<String>,
+    expected_close_date: Option<Timestamp>,
+    owner_id: Option<Principal>,
+    created_by: Option<Principal>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
+}
+
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct PaginatedContactV2Response {
+    items: Vec<ContactV2>,
+    total: u64,
+    offset: u64,
+    limit: u64,
+}
+
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct PaginatedDealV2Response {
+    items: Vec<DealV2>,
+    total: u64,
+    offset: u64,
+    limit: u64,
+}
+
+/// Admin permissions enum
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize, PartialEq)]
+enum AdminPermission {
+    ViewOwnContacts,
+    ViewAllContacts,
+    EditOwnContacts,
+    EditAllContacts,
+    DeleteOwnContacts,
+    DeleteAllContacts,
+    ViewOwnDeals,
+    ViewAllDeals,
+    EditOwnDeals,
+    EditAllDeals,
+    DeleteOwnDeals,
+    DeleteAllDeals,
+    ManageFeatureFlags,
+    ViewAuditLogs,
+}
+
+/// Audit log entry
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct AuditLogEntry {
+    id: u64,
+    timestamp: Timestamp,
+    actor: Principal,
+    action: String,
+    target_type: String,
+    target_id: String,
+    details: Option<String>,
+}
+
+/// Request to update a contact
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct UpdateContactRequest {
+    id: ContactId,
+    name: Option<String>,
+    company: Option<String>,
+    job_title: Option<String>,
+    interest_area: Option<String>,
+    notes: Option<String>,
+    status: Option<ContactStatus>,
+}
+
+/// Request to update a deal
+#[derive(Clone, Debug, candid::CandidType, Deserialize, Serialize)]
+struct UpdateDealRequest {
+    id: DealId,
+    name: Option<String>,
+    value: Option<u64>,
+    stage: Option<DealStage>,
+    notes: Option<String>,
+    expected_close_date: Option<Timestamp>,
+}
+
 // ============================================================================
 // Test Helpers
 // ============================================================================
@@ -2780,4 +2887,522 @@ fn test_anonymous_cannot_create_contact() {
 
     let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
     assert!(result.is_err(), "Anonymous should not be able to create contact");
+}
+
+// ============================================================================
+// FOS-5.6.10: Row-Level Security & Permissions Tests
+// ============================================================================
+
+#[test]
+fn test_contact_has_owner_id_set_on_creation() {
+    let (pic, canister_id, controller) = setup();
+
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "owner-test@example.com".to_string(),
+        name: Some("Owner Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should be able to create contact");
+
+    let contact = result.unwrap();
+    assert_eq!(contact.owner_id, Some(controller), "owner_id should be set to caller");
+}
+
+#[test]
+fn test_deal_has_owner_id_set_on_creation() {
+    let (pic, canister_id, controller) = setup();
+
+    // Create contact first
+    let contact_req = CreateContactRequest {
+        user_id: None,
+        email: "deal-owner@example.com".to_string(),
+        name: Some("Deal Owner Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(contact_req).unwrap(),
+        )
+        .unwrap();
+    let contact: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact_id = contact.unwrap().id;
+
+    // Create deal
+    let deal_req = CreateDealRequest {
+        contact_id,
+        name: "Owner Test Deal".to_string(),
+        value: Some(1000),
+        notes: None,
+        expected_close_date: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_deal",
+            encode_one(deal_req).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<DealV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should be able to create deal");
+
+    let deal = result.unwrap();
+    assert_eq!(deal.owner_id, Some(controller), "owner_id should be set to caller");
+    assert_eq!(deal.created_by, Some(controller), "created_by should be set to caller");
+}
+
+#[test]
+fn test_grant_permission_by_controller() {
+    let (pic, canister_id, controller) = setup();
+    let admin = non_admin_principal();
+
+    // Add admin first
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "add_admin",
+            encode_one(admin).unwrap(),
+        )
+        .unwrap();
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok());
+
+    // Grant ViewAllContacts permission
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "grant_permission",
+            encode_args((admin, AdminPermission::ViewAllContacts)).unwrap(),
+        )
+        .unwrap();
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Controller should be able to grant permissions");
+
+    // Verify permission was granted
+    let response = pic
+        .query_call(
+            canister_id,
+            admin,
+            "get_permissions",
+            encode_one(None::<Principal>).unwrap(),
+        )
+        .unwrap();
+    let perms: Result<Vec<AdminPermission>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(perms.is_ok());
+    assert!(perms.unwrap().contains(&AdminPermission::ViewAllContacts));
+}
+
+#[test]
+fn test_non_controller_cannot_grant_permissions() {
+    let (pic, canister_id, controller) = setup();
+    // Use a specific non-controller principal for this test
+    let admin = Principal::from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]);
+
+    // Add admin (by controller)
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "add_admin",
+            encode_one(admin).unwrap(),
+        )
+        .unwrap();
+    let _: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+
+    // Admin (non-controller) tries to grant permission
+    // This should fail because grant_permission requires controller access
+    let response = pic
+        .update_call(
+            canister_id,
+            admin,
+            "grant_permission",
+            encode_args((admin, AdminPermission::ViewAllContacts)).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    // Note: This test verifies that a non-controller admin cannot grant permissions
+    // The require_controller() function queries the management canister in production
+    // In PocketIC, the controller list is set by the test setup
+    assert!(result.is_err(), "Non-controller admin should not be able to grant permissions: {:?}", result);
+}
+
+#[test]
+fn test_audit_log_created_on_contact_create() {
+    let (pic, canister_id, controller) = setup();
+
+    // Grant ViewAuditLogs permission to controller (controllers have all permissions implicitly)
+
+    // Create a contact
+    let request = CreateContactRequest {
+        user_id: None,
+        email: "audit-test@example.com".to_string(),
+        name: Some("Audit Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let _ = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    // Check audit log
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_audit_log",
+            encode_args((
+                Some("create_contact".to_string()),
+                None::<String>,
+                None::<Principal>,
+                Some(10u64),
+            )).unwrap(),
+        )
+        .unwrap();
+
+    let entries: Result<Vec<AuditLogEntry>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(entries.is_ok());
+    let logs = entries.unwrap();
+    assert!(!logs.is_empty(), "Should have audit log entry for contact creation");
+    assert_eq!(logs[0].action, "create_contact");
+    assert_eq!(logs[0].target_type, "contact");
+    assert_eq!(logs[0].actor, controller);
+}
+
+#[test]
+fn test_feature_flag_requires_permission() {
+    let (pic, canister_id, controller) = setup();
+    let admin = non_admin_principal();
+
+    // Add admin without ManageFeatureFlags permission
+    let _ = pic
+        .update_call(
+            canister_id,
+            controller,
+            "add_admin",
+            encode_one(admin).unwrap(),
+        )
+        .unwrap();
+
+    // Try to set feature flag without permission
+    let request = SetFeatureFlagRequest {
+        key: "test_flag".to_string(),
+        enabled: true,
+        description: Some("Test flag".to_string()),
+        percentage: None,
+        allowed_principals: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            admin,
+            "set_feature_flag",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<(), String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_err(), "Admin without ManageFeatureFlags should not be able to set flags");
+    assert!(result.unwrap_err().contains("ManageFeatureFlags"));
+}
+
+#[test]
+fn test_feature_flag_audit_logging() {
+    let (pic, canister_id, controller) = setup();
+
+    // Set feature flag as controller
+    let request = SetFeatureFlagRequest {
+        key: "audit_test_flag".to_string(),
+        enabled: true,
+        description: Some("Audit test flag".to_string()),
+        percentage: Some(50),
+        allowed_principals: None,
+    };
+
+    let _ = pic
+        .update_call(
+            canister_id,
+            controller,
+            "set_feature_flag",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    // Check audit log
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_audit_log",
+            encode_args((
+                Some("set_feature_flag".to_string()),
+                None::<String>,
+                None::<Principal>,
+                Some(10u64),
+            )).unwrap(),
+        )
+        .unwrap();
+
+    let entries: Result<Vec<AuditLogEntry>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(entries.is_ok());
+    let logs = entries.unwrap();
+    assert!(!logs.is_empty(), "Should have audit log entry for feature flag set");
+    assert_eq!(logs[0].action, "set_feature_flag");
+    assert_eq!(logs[0].target_type, "feature_flag");
+    assert_eq!(logs[0].target_id, "audit_test_flag");
+}
+
+#[test]
+fn test_update_contact_with_permission() {
+    let (pic, canister_id, controller) = setup();
+
+    // Create contact
+    let create_req = CreateContactRequest {
+        user_id: None,
+        email: "update-perm@example.com".to_string(),
+        name: Some("Update Perm Test".to_string()),
+        company: Some("Old Company".to_string()),
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(create_req).unwrap(),
+        )
+        .unwrap();
+    let contact: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact_id = contact.unwrap().id;
+
+    // Update contact (controller has all permissions)
+    let update_req = UpdateContactRequest {
+        id: contact_id,
+        name: Some("Updated Name".to_string()),
+        company: Some("New Company".to_string()),
+        job_title: None,
+        interest_area: None,
+        notes: None,
+        status: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "update_contact",
+            encode_one(update_req).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Controller should be able to update contact");
+    let updated = result.unwrap();
+    assert_eq!(updated.name, Some("Updated Name".to_string()));
+    assert_eq!(updated.company, Some("New Company".to_string()));
+}
+
+#[test]
+fn test_delete_contact_creates_audit_log() {
+    let (pic, canister_id, controller) = setup();
+
+    // Create contact
+    let create_req = CreateContactRequest {
+        user_id: None,
+        email: "delete-audit@example.com".to_string(),
+        name: Some("Delete Audit Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "create_contact",
+            encode_one(create_req).unwrap(),
+        )
+        .unwrap();
+    let contact: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    let contact_id = contact.unwrap().id;
+
+    // Delete contact
+    let response = pic
+        .update_call(
+            canister_id,
+            controller,
+            "delete_contact",
+            encode_one(contact_id).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<ContactV2, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "Should be able to delete contact");
+
+    // Check audit log
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_audit_log",
+            encode_args((
+                Some("delete_contact".to_string()),
+                None::<String>,
+                None::<Principal>,
+                Some(10u64),
+            )).unwrap(),
+        )
+        .unwrap();
+
+    let entries: Result<Vec<AuditLogEntry>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(entries.is_ok());
+    let logs = entries.unwrap();
+    assert!(!logs.is_empty(), "Should have audit log entry for delete");
+    assert_eq!(logs[0].action, "delete_contact");
+}
+
+// =============================================================================
+// FOS-5.6.10: AC-5.6.10.4 - Audit logging for CRM operations from signup flow
+// =============================================================================
+
+#[test]
+fn test_create_contact_from_signup_creates_audit_logs() {
+    let (pic, canister_id, controller) = setup();
+
+    // Register the user-service canister for inter-canister auth
+    let user_service_principal = Principal::from_text("rrkah-fqaaa-aaaaa-aaaaq-cai").unwrap();
+
+    pic.update_call(
+        canister_id,
+        controller,
+        "register_authorized_canister",
+        encode_args(("user-service".to_string(), user_service_principal)).unwrap(),
+    )
+    .unwrap();
+
+    // Call create_contact_from_signup from authorized canister
+    let request = CreateContactRequest {
+        user_id: Some("user-audit-test-123".to_string()),
+        email: "signup-audit-test@example.com".to_string(),
+        name: Some("Signup Audit Test".to_string()),
+        company: None,
+        job_title: None,
+        interest_area: None,
+        source: Some(ContactSource::Signup),
+        notes: None,
+    };
+
+    let response = pic
+        .update_call(
+            canister_id,
+            user_service_principal,
+            "create_contact_from_signup",
+            encode_one(request).unwrap(),
+        )
+        .unwrap();
+
+    let result: Result<Contact, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(result.is_ok(), "create_contact_from_signup should succeed");
+
+    // Check audit log for contact creation
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_audit_log",
+            encode_args((
+                Some("create_contact_from_signup".to_string()),
+                None::<String>,
+                None::<Principal>,
+                Some(10u64),
+            )).unwrap(),
+        )
+        .unwrap();
+
+    let entries: Result<Vec<AuditLogEntry>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(entries.is_ok(), "Should be able to query audit log");
+    let contact_logs = entries.unwrap();
+    assert!(!contact_logs.is_empty(), "Should have audit log entry for create_contact_from_signup");
+    assert_eq!(contact_logs[0].action, "create_contact_from_signup");
+    assert_eq!(contact_logs[0].target_type, "contact");
+    assert_eq!(contact_logs[0].actor, user_service_principal, "Actor should be the user-service canister");
+
+    // Verify the audit log details contains source and user_id
+    assert!(contact_logs[0].details.is_some(), "Audit log should have details");
+    let details = contact_logs[0].details.as_ref().unwrap();
+    assert!(details.contains("user_signup"), "Details should indicate source is user_signup");
+    assert!(details.contains("user-audit-test-123"), "Details should contain user_id");
+
+    // Check audit log for auto-created deal
+    let response = pic
+        .query_call(
+            canister_id,
+            controller,
+            "get_audit_log",
+            encode_args((
+                Some("create_deal_from_signup".to_string()),
+                None::<String>,
+                None::<Principal>,
+                Some(10u64),
+            )).unwrap(),
+        )
+        .unwrap();
+
+    let entries: Result<Vec<AuditLogEntry>, String> = decode_one(&unwrap_wasm_result(response)).unwrap();
+    assert!(entries.is_ok(), "Should be able to query audit log");
+    let deal_logs = entries.unwrap();
+    assert!(!deal_logs.is_empty(), "Should have audit log entry for auto-created deal");
+    assert_eq!(deal_logs[0].action, "create_deal_from_signup");
+    assert_eq!(deal_logs[0].target_type, "deal");
+    assert_eq!(deal_logs[0].actor, user_service_principal, "Actor should be the user-service canister");
+
+    // Verify the deal audit log details contains contact reference
+    assert!(deal_logs[0].details.is_some(), "Deal audit log should have details");
+    let deal_details = deal_logs[0].details.as_ref().unwrap();
+    assert!(deal_details.contains("source"), "Deal details should contain source");
 }

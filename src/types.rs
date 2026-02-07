@@ -36,6 +36,7 @@ pub enum ContactStatus {
 }
 
 /// Contact record
+/// @see AC-5.6.10.1 - Row-level security: contacts have owner_id for filtering
 #[derive(Clone, Debug, CandidType, Deserialize, Serialize)]
 pub struct Contact {
     pub id: ContactId,
@@ -48,6 +49,13 @@ pub struct Contact {
     pub source: ContactSource,
     pub notes: Option<String>,
     pub status: ContactStatus,
+    /// Owner of this contact record (admin who created it)
+    /// @see FOS-5.6.10 - Row-level security
+    #[serde(default)]
+    pub owner_id: Option<Principal>,
+    /// Team ID for future team-based filtering
+    #[serde(default)]
+    pub team_id: Option<String>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -63,6 +71,19 @@ pub struct CreateContactRequest {
     pub interest_area: Option<String>,
     pub source: Option<ContactSource>,
     pub notes: Option<String>,
+}
+
+/// Request to update a contact
+/// @see AC-5.6.10.3 - Granular CRUD permissions
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct UpdateContactRequest {
+    pub id: ContactId,
+    pub name: Option<String>,
+    pub company: Option<String>,
+    pub job_title: Option<String>,
+    pub interest_area: Option<String>,
+    pub notes: Option<String>,
+    pub status: Option<ContactStatus>,
 }
 
 // =============================================================================
@@ -82,6 +103,7 @@ pub enum DealStage {
 }
 
 /// Deal record
+/// @see AC-5.6.10.1 - Row-level security: deals have owner_id for filtering
 #[derive(Clone, Debug, CandidType, Deserialize, Serialize)]
 pub struct Deal {
     pub id: DealId,
@@ -91,6 +113,13 @@ pub struct Deal {
     pub stage: DealStage,
     pub notes: Option<String>,
     pub expected_close_date: Option<Timestamp>,
+    /// Owner of this deal record (admin who created it)
+    /// @see FOS-5.6.10 - Row-level security
+    #[serde(default)]
+    pub owner_id: Option<Principal>,
+    /// Principal who created the deal (for audit trail)
+    #[serde(default)]
+    pub created_by: Option<Principal>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
 }
@@ -101,6 +130,18 @@ pub struct CreateDealRequest {
     pub contact_id: ContactId,
     pub name: String,
     pub value: Option<u64>,
+    pub notes: Option<String>,
+    pub expected_close_date: Option<Timestamp>,
+}
+
+/// Request to update a deal
+/// @see AC-5.6.10.3 - Granular CRUD permissions
+#[derive(Clone, Debug, CandidType, Deserialize)]
+pub struct UpdateDealRequest {
+    pub id: DealId,
+    pub name: Option<String>,
+    pub value: Option<u64>,
+    pub stage: Option<DealStage>,
     pub notes: Option<String>,
     pub expected_close_date: Option<Timestamp>,
 }
@@ -269,4 +310,46 @@ pub struct FinancialSummary {
     pub mrr: u64,
     pub period_start: Timestamp,
     pub period_end: Timestamp,
+}
+
+// =============================================================================
+// Admin Permissions (FOS-5.6.10)
+// =============================================================================
+
+/// Granular admin permissions for row-level security
+/// @see AC-5.6.10.1 - Row-level security filtering
+/// @see AC-5.6.10.3 - Granular CRUD permissions
+#[derive(Clone, Debug, CandidType, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub enum AdminPermission {
+    // Contact permissions
+    ViewOwnContacts,
+    ViewAllContacts,
+    EditOwnContacts,
+    EditAllContacts,
+    DeleteOwnContacts,
+    DeleteAllContacts,
+    // Deal permissions
+    ViewOwnDeals,
+    ViewAllDeals,
+    EditOwnDeals,
+    EditAllDeals,
+    DeleteOwnDeals,
+    DeleteAllDeals,
+    // Other admin permissions
+    ManageFeatureFlags,
+    ViewAuditLogs,
+}
+
+/// Audit log entry for tracking admin actions
+/// @see AC-5.6.10.4 - CRM audit logging
+/// @see AC-5.6.10.5 - Feature flag audit logging
+#[derive(Clone, Debug, CandidType, Deserialize, Serialize)]
+pub struct AuditLogEntry {
+    pub id: u64,
+    pub timestamp: Timestamp,
+    pub actor: Principal,
+    pub action: String,
+    pub target_type: String,
+    pub target_id: String,
+    pub details: Option<String>,
 }
