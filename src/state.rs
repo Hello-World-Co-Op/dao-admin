@@ -869,9 +869,16 @@ thread_local! {
     pub static STATE: RefCell<State> = RefCell::new(State::new());
 }
 
+/// Current state version for migration support (FOS-5.6.18)
+pub const STATE_VERSION: u32 = 1;
+
 /// Serializable state for upgrades
+/// FOS-5.6.18: Added version field for future migrations
 #[derive(candid::CandidType, serde::Deserialize, Clone)]
 pub struct StableState {
+    /// State version for future migrations (FOS-5.6.18)
+    #[serde(default)]
+    pub version: u32,
     pub controllers: Vec<Principal>,
     pub admins: Vec<Principal>,
     #[serde(default)]
@@ -898,6 +905,7 @@ pub struct StableState {
 impl From<&State> for StableState {
     fn from(state: &State) -> Self {
         StableState {
+            version: STATE_VERSION,
             controllers: state.controllers.clone(),
             admins: state.admins.clone(),
             authorized_canisters: state.authorized_canisters.iter().map(|(k, v)| (k.clone(), *v)).collect(),
