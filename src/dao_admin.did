@@ -246,4 +246,14 @@ service : (opt vec principal) -> {
     // Stats & Health
     get_admin_stats : () -> (variant { Ok : AdminStats; Err : text }) query;
     health : () -> (text) query;
+
+    // ============================================================
+    // BACKUP & RECOVERY (FOS-5.6.19)
+    // ============================================================
+
+    // Export canister state for backup (public query)
+    export_state : () -> (blob) query;
+
+    // Import canister state from backup (controller-only)
+    import_state : (blob) -> (variant { Ok; Err: text });
 }

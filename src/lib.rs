@@ -972,5 +972,71 @@ fn health() -> String {
     "ok".to_string()
 }
 
+// =============================================================================
+// State Export/Import (FOS-5.6.19: Canister Backup & Export)
+// =============================================================================
+
+/// Metadata wrapper for exported state
+#[derive(candid::CandidType, serde::Deserialize, Clone)]
+pub struct StateExportMetadata {
+    pub canister_id: Principal,
+    pub canister_name: String,
+    pub state_version: u32,
+    pub export_timestamp: u64,
+}
+
+/// Export the canister's complete state for backup purposes.
+/// Returns Candid-encoded bytes containing metadata and state.
+#[query]
+fn export_state() -> Vec<u8> {
+    use candid::encode_args;
+    let metadata = StateExportMetadata {
+        canister_id: ic_cdk::id(),
+        canister_name: "dao-admin".to_string(),
+        state_version: state::STATE_VERSION,
+        export_timestamp: ic_cdk::api::time(),
+    };
+    STATE.with(|s| {
+        let stable: StableState = (&*s.borrow()).into();
+        encode_args((metadata, stable)).expect("Failed to encode dao-admin state for export")
+    })
+}
+
+/// Import state from a backup. Controller-only access.
+/// Accepts Candid-encoded bytes containing metadata and state.
+#[update]
+fn import_state(data: Vec<u8>) -> Result<(), String> {
+    use candid::decode_args;
+    let caller = ic_cdk::caller();
+    if !ic_cdk::api::is_controller(&caller) {
+        return Err("Unauthorized: controller access required".to_string());
+    }
+
+    let (metadata, imported_stable): (StateExportMetadata, StableState) =
+        decode_args(&data).map_err(|e| format!("Failed to decode state: {}", e))?;
+
+    if metadata.state_version > state::STATE_VERSION {
+        return Err(format!(
+            "State version mismatch: backup v{} is newer than canister v{}",
+            metadata.state_version, state::STATE_VERSION
+        ));
+    }
+
+    // Convert StableState back to State
+    let restored = State::from(imported_stable);
+
+    STATE.with(|s| {
+        *s.borrow_mut() = restored;
+    });
+
+    ic_cdk::println!(
+        "[BACKUP] Imported state from backup (v{}, timestamp: {})",
+        metadata.state_version,
+        metadata.export_timestamp
+    );
+
+    Ok(())
+}
+
 // Export candid interface
 ic_cdk::export_candid!();
